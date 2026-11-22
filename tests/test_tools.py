@@ -1,8 +1,9 @@
 import pytest
 
+from app.agent.loop import run_tool
 from app.agent.tools import FAQ_MIN_SIMILARITY, build_tools
 from app.core.config import get_settings
-from app.core.llm import LLMError
+from app.core.llm import LLMError, ToolCall
 from app.db.models import FaqEntry
 from app.services.lead import InvalidLeadError, create_lead
 
@@ -32,8 +33,10 @@ async def test_service_rejects_invalid_email(session, bad_email):
         await create_lead(session, name="X", email=bad_email)
 
 
+
 async def run_create_lead(session, args: dict) -> dict:
-    return await build_tools(session)["create_lead"].handler(args)
+    output, _status = await run_tool(ToolCall(name="create_lead", args=args), build_tools(session))
+    return output
 
 
 async def test_tool_returns_only_ids_on_success(session):
@@ -65,9 +68,6 @@ async def test_tool_reports_business_rule_error_and_session_stays_usable(session
     assert ok["created"] is True
 
 
-# ---- search_faq ---------------------------------------------------------------
-# Fake vectors make the similarity exact: unit vector i has cosine similarity
-# 1.0 with itself and 0.0 with every other unit vector.
 
 
 def unit(i: int) -> list[float]:
@@ -98,7 +98,9 @@ async def add_faqs(session) -> None:
 
 
 async def run_search(session, args: dict, embed) -> dict:
-    return await build_tools(session, embed_query_fn=embed)["search_faq"].handler(args)
+    tools = build_tools(session, embed_query_fn=embed)
+    output, _status = await run_tool(ToolCall(name="search_faq", args=args), tools)
+    return output
 
 
 async def test_search_faq_returns_the_matching_entry_only(session):
@@ -113,7 +115,6 @@ async def test_search_faq_returns_the_matching_entry_only(session):
 
 async def test_search_faq_drops_matches_below_the_threshold(session):
     await add_faqs(session)
-    # Cosine similarity with entry 0 is 0.6, below FAQ_MIN_SIMILARITY; 0 with entry 1.
     weak = unit(0)
     weak[0], weak[5] = 0.6, 0.8
     assert 0.6 < FAQ_MIN_SIMILARITY
@@ -132,7 +133,7 @@ async def test_search_faq_rejects_bad_arguments_without_calling_the_embedder(ses
 
     assert "question" in missing["error"]
     assert "lang" in extra["error"]
-    assert "blank" in blank["error"]
+    assert blank["error"].startswith("Invalid arguments. question:")
     assert embed.seen == []
 
 
