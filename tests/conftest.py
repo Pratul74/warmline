@@ -1,4 +1,5 @@
 import pytest_asyncio
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 
 from app.core.config import get_settings
@@ -16,6 +17,7 @@ assert TEST_DATABASE_URL.endswith("test_db"), "Refusing to run tests against a n
 async def engine():
     engine = create_async_engine(TEST_DATABASE_URL)
     async with engine.begin() as conn:
+        await conn.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
         await conn.run_sync(Base.metadata.create_all)
     yield engine
     async with engine.begin() as conn:
