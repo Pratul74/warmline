@@ -49,7 +49,8 @@ async def _run_tool(call: ToolCall, tools: dict[str, Tool]) -> tuple[dict[str, A
     if tool is None:
         return {"error": f"Unknown tool '{call.name}'. Available tools: {sorted(tools)}"}, False
     try:
-        return await tool.handler(call.args), True
+        output = await tool.handler(call.args)
+        return output, "error" not in output
     except Exception:
         logger.exception("Tool %s crashed", call.name)
         return {"error": f"Tool '{call.name}' failed with an internal error."}, False
