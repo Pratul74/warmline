@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from functools import lru_cache
-from typing import Any, Literal
+from typing import Any, Literal, TypeVar
 
 from google import genai
 from google.genai import errors, types
@@ -13,6 +14,8 @@ from app.core.config import get_settings
 MAX_ATTEMPTS = 3
 RETRY_DELAYS_SECONDS = (1.0, 2.0)
 RETRYABLE_STATUS_CODES = {429, 503}
+
+T = TypeVar("T")
 
 
 class LLMError(Exception):
@@ -134,25 +137,12 @@ def _from_response(response: types.GenerateContentResponse) -> ChatResult:
     )
 
 
-async def chat(
-    messages: list[Message],
-    tools: list[ToolSpec],
-    *,
-    system: str | None = None,
-    client: Any = None,
-) -> ChatResult:
+async def _call_with_retry(make_call: Callable[[], Awaitable[T]]) -> T:
     settings = get_settings()
-    client = client or _default_client()
-    contents = _to_contents(messages)
-    config = _to_config(tools, system)
-
     for attempt in range(1, MAX_ATTEMPTS + 1):
         try:
             async with asyncio.timeout(settings.llm_timeout_seconds):
-                response = await client.aio.models.generate_content(
-                    model=settings.gemini_model, contents=contents, config=config
-                )
-            return _from_response(response)
+                return await make_call()
 
         except TimeoutError as exc:
             raise LLMError(f"Model did not answer within {settings.llm_timeout_seconds}s") from exc
@@ -166,3 +156,59 @@ async def chat(
             raise LLMError(f"Model request failed with status {exc.code}") from exc
 
     raise AssertionError("unreachable")
+
+
+async def chat(
+    messages: list[Message],
+    tools: list[ToolSpec],
+    *,
+    system: str | None = None,
+    client: Any = None,
+) -> ChatResult:
+    settings = get_settings()
+    client = client or _default_client()
+    contents = _to_contents(messages)
+    config = _to_config(tools, system)
+
+    response = await _call_with_retry(
+        lambda: client.aio.models.generate_content(
+            model=settings.gemini_model, contents=contents, config=config
+        )
+    )
+    return _from_response(response)
+
+
+def _query_text(text: str) -> str:
+    return f"task: search result | query: {text}"
+
+
+def _document_text(title: str, text: str) -> str:
+    return f"title: {title} | text: {text}"
+
+
+async def _embed(contents: list[str], client: Any) -> list[list[float]]:
+    settings = get_settings()
+    client = client or _default_client()
+    config = types.EmbedContentConfig(output_dimensionality=settings.embedding_dim)
+    batch = [types.Content(parts=[types.Part(text=text)]) for text in contents]
+
+    response = await _call_with_retry(
+        lambda: client.aio.models.embed_content(
+            model=settings.gemini_embedding_model, contents=batch, config=config
+        )
+    )
+    vectors = [list(e.values or []) for e in response.embeddings or []]
+    if len(vectors) != len(contents):
+        raise LLMError(f"Expected {len(contents)} embeddings, got {len(vectors)}")
+    if any(len(v) != settings.embedding_dim for v in vectors):
+        raise LLMError(f"Embedding size is not the expected {settings.embedding_dim}")
+    return vectors
+
+
+async def embed_query(text: str, *, client: Any = None) -> list[float]:
+    [vector] = await _embed([_query_text(text)], client)
+    return vector
+
+
+async def embed_documents(docs: list[tuple[str, str]], *, client: Any = None) -> list[list[float]]:
+    return await _embed([_document_text(title, text) for title, text in docs], client)
