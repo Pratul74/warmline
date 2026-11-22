@@ -4,7 +4,7 @@ import json
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import insert, select, update
+from sqlalchemy import insert, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models import ToolCall, ToolCallStatus
@@ -25,8 +25,6 @@ class InvalidToolCallError(ToolCallError, ValueError):
     """The log entry itself is malformed (a programming error in the caller)."""
 
 
-class ToolCallNotFoundError(ToolCallError):
-    """No tool call exists with the given id."""
 
 def _clean_tool_name(tool_name: str) -> str:
     clean_name = tool_name.strip()
@@ -81,7 +79,19 @@ def _validate_history_limit(limit: int) -> int:
         raise InvalidToolCallError("limit must be at least 1")
     return min(limit, MAX_HISTORY_LIMIT)
 
-async def log_tool_call(session: AsyncSession, *, conversation_id: int, request_id: UUID, step_number: int, tool_name: str, arguments: dict[str, Any], status: ToolCallStatus, duration_ms: int, result: Any | None = None, error_message: str | None = None,) -> ToolCall:
+async def log_tool_call(
+        session: AsyncSession,
+        *,
+        conversation_id: int,
+        request_id: UUID,
+        step_number: int,
+        tool_name: str,
+        arguments: dict[str, Any],
+        status: ToolCallStatus,
+        duration_ms: int,
+        result: Any | None = None,
+        error_message: str | None = None,
+) -> ToolCall:
     stmt = (
         insert(ToolCall)
         .values(
@@ -101,34 +111,6 @@ async def log_tool_call(session: AsyncSession, *, conversation_id: int, request_
     )
     return (await session.scalars(stmt)).one()
 
-async def update_tool_call(
-        session: AsyncSession,
-        *,
-        tool_call_id: int,
-        status: ToolCallStatus,
-        duration_ms: int,
-        result: Any | None = None,
-        error_message: str | None = None,
-) -> ToolCall:
-    stmt = (
-        update(ToolCall)
-        .where(ToolCall.id == tool_call_id)
-        .values(
-            **_outcome_values(
-                status=status,
-                duration_ms=duration_ms,
-                result=result,
-                error_message=error_message,
-            )
-        )
-        .returning(ToolCall)
-        .execution_options(populate_existing=True)
-    )
-    updated_call = (await session.scalars(stmt)).one_or_none()
-    if updated_call is None:
-        raise ToolCallNotFoundError(f"Tool call {tool_call_id} not found")
-    return updated_call
-
 async def get_tool_history(
         session: AsyncSession,
         *,
@@ -145,5 +127,5 @@ async def get_tool_history(
         .order_by(ToolCall.id.desc())
         .limit(_validate_history_limit(limit))
     )
-    newest_first = set((await session.scalars(stmt)).all())
+    newest_first = (await session.scalars(stmt)).all()
     return list(reversed(newest_first))
