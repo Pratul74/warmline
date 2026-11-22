@@ -14,3 +14,5 @@
 - Only user and assistant text is stored as conversation history. Tool
   calls are not replayed on later turns.
 - `GET /health` includes the raw database error text in its 503 response.
+- `create_lead` saves a lead without asking the customer to confirm it,
+  checks only the email's shape, and treats the same email as the same lead.
