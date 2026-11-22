@@ -3,11 +3,13 @@ from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.api.chat import router as chat_router
 from app.db.session import get_session
 
 app = FastAPI(
     title="Warmline - A Sales and support Agent"
 )
+app.include_router(chat_router)
 
 @app.get("/")
 async def root():
