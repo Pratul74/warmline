@@ -17,10 +17,7 @@ class Settings(BaseSettings):
 
     gemini_api_key: SecretStr
     gemini_model: str
-    openai_model: str
     embedding_dim: int
-    coarena_api_key: SecretStr
-    coarena_base_url: str
     llm_timeout_seconds: float = Field(default=30.0, gt=0)
 
     agent_max_steps: int = Field(default=6, ge=1, le=20)
