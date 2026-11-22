@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections.abc import Awaitable, Callable
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.agent.loop import Tool
@@ -26,8 +26,9 @@ FAQ_TOP_K = 3
 EmbedQueryFn = Callable[[str], Awaitable[list[float]]]
 
 
+
 class CreateLeadArgs(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
     name: str = Field(min_length=1, max_length=MAX_NAME_LENGTH, description="Customer's full name")
     email: str = Field(min_length=3, max_length=MAX_EMAIL_LENGTH, description="Customer's email address")
@@ -50,7 +51,7 @@ CREATE_LEAD_SPEC = ToolSpec(
 
 
 class SearchFaqArgs(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
     question: str = Field(
         min_length=1,
@@ -69,40 +70,21 @@ SEARCH_FAQ_SPEC = ToolSpec(
 )
 
 
-def describe_validation_error(exc: ValidationError) -> str:
-    problems = [
-        f"{'.'.join(str(part) for part in err['loc']) or 'input'}: {err['msg']}"
-        for err in exc.errors(include_url=False)
-    ]
-    return "Invalid arguments. " + "; ".join(problems)
-
-
 def build_tools(
     session: AsyncSession, *, embed_query_fn: EmbedQueryFn = embed_query
 ) -> dict[str, Tool]:
 
-    async def create_lead_handler(args: dict[str, Any]) -> dict[str, Any]:
-        try:
-            parsed = CreateLeadArgs.model_validate(args)
-        except ValidationError as exc:
-            return {"error": describe_validation_error(exc)}
+    async def create_lead_handler(args: CreateLeadArgs) -> dict[str, Any]:
         try:
             async with session.begin_nested():
-                result = await create_lead(session, **parsed.model_dump())
+                result = await create_lead(session, **args.model_dump())
         except InvalidLeadError as exc:
             return {"error": str(exc)}
         return {"lead_id": result.lead.id, "created": result.created}
 
-    async def search_faq_handler(args: dict[str, Any]) -> dict[str, Any]:
+    async def search_faq_handler(args: SearchFaqArgs) -> dict[str, Any]:
         try:
-            parsed = SearchFaqArgs.model_validate(args)
-        except ValidationError as exc:
-            return {"error": describe_validation_error(exc)}
-        question = parsed.question.strip()
-        if not question:
-            return {"error": "Invalid arguments. question: must not be blank"}
-        try:
-            vector = await embed_query_fn(question)
+            vector = await embed_query_fn(args.question)
         except LLMError:
             return {"error": "FAQ search is unavailable right now."}
         matches = await search_faq(
@@ -116,6 +98,6 @@ def build_tools(
         }
 
     return {
-        "create_lead": Tool(CREATE_LEAD_SPEC, create_lead_handler),
-        "search_faq": Tool(SEARCH_FAQ_SPEC, search_faq_handler),
+        "create_lead": Tool(CREATE_LEAD_SPEC, CreateLeadArgs, create_lead_handler),
+        "search_faq": Tool(SEARCH_FAQ_SPEC, SearchFaqArgs, search_faq_handler),
     }
