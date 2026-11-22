@@ -1,12 +1,14 @@
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.agent.loop import Tool
-from app.core.llm import ToolSpec
+from app.core.llm import LLMError, ToolSpec, embed_query
+from app.services.faq import search_faq
 from app.services.lead import (
     MAX_EMAIL_LENGTH,
     MAX_NAME_LENGTH,
@@ -16,6 +18,12 @@ from app.services.lead import (
 )
 
 MAX_NOTES_LENGTH = 1000
+MAX_QUESTION_LENGTH = 500
+
+FAQ_MIN_SIMILARITY = 0.70
+FAQ_TOP_K = 3
+
+EmbedQueryFn = Callable[[str], Awaitable[list[float]]]
 
 
 class CreateLeadArgs(BaseModel):
@@ -41,6 +49,26 @@ CREATE_LEAD_SPEC = ToolSpec(
 )
 
 
+class SearchFaqArgs(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    question: str = Field(
+        min_length=1,
+        max_length=MAX_QUESTION_LENGTH,
+        description="The customer's question, in their own words",
+    )
+
+
+SEARCH_FAQ_SPEC = ToolSpec(
+    name="search_faq",
+    description=(
+        "Search the business's FAQ for answers about hours, services, prices, policies "
+        "and similar. Returns the closest matching FAQ entries, or none if nothing matches."
+    ),
+    parameters=SearchFaqArgs.model_json_schema(),
+)
+
+
 def describe_validation_error(exc: ValidationError) -> str:
     problems = [
         f"{'.'.join(str(part) for part in err['loc']) or 'input'}: {err['msg']}"
@@ -49,7 +77,9 @@ def describe_validation_error(exc: ValidationError) -> str:
     return "Invalid arguments. " + "; ".join(problems)
 
 
-def build_tools(session: AsyncSession) -> dict[str, Tool]:
+def build_tools(
+    session: AsyncSession, *, embed_query_fn: EmbedQueryFn = embed_query
+) -> dict[str, Tool]:
 
     async def create_lead_handler(args: dict[str, Any]) -> dict[str, Any]:
         try:
@@ -63,4 +93,29 @@ def build_tools(session: AsyncSession) -> dict[str, Tool]:
             return {"error": str(exc)}
         return {"lead_id": result.lead.id, "created": result.created}
 
-    return {"create_lead": Tool(CREATE_LEAD_SPEC, create_lead_handler)}
+    async def search_faq_handler(args: dict[str, Any]) -> dict[str, Any]:
+        try:
+            parsed = SearchFaqArgs.model_validate(args)
+        except ValidationError as exc:
+            return {"error": describe_validation_error(exc)}
+        question = parsed.question.strip()
+        if not question:
+            return {"error": "Invalid arguments. question: must not be blank"}
+        try:
+            vector = await embed_query_fn(question)
+        except LLMError:
+            return {"error": "FAQ search is unavailable right now."}
+        matches = await search_faq(
+            session, vector, top_k=FAQ_TOP_K, min_similarity=FAQ_MIN_SIMILARITY
+        )
+        return {
+            "matches": [
+                {"question": m.question, "answer": m.answer, "similarity": round(m.similarity, 2)}
+                for m in matches
+            ]
+        }
+
+    return {
+        "create_lead": Tool(CREATE_LEAD_SPEC, create_lead_handler),
+        "search_faq": Tool(SEARCH_FAQ_SPEC, search_faq_handler),
+    }
