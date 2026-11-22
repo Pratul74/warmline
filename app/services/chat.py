@@ -1,18 +1,27 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from uuid import UUID, uuid4
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.agent.loop import AgentResult, ChatFn, run_agent
+from app.agent.loop import AgentResult, ChatFn, ToolRun, run_agent
 from app.agent.prompts import SYSTEM_PROMPT
 from app.agent.tools import EmbedQueryFn, build_tools
 from app.core.llm import LLMError, Message, chat, embed_query
-from app.db.models import Conversation, MessageRole
+from app.db.models import Conversation, MessageRole, ToolCallStatus
 from app.db.models import Message as DbMessage
+from app.services.tool_calls import log_tool_call
 
 HISTORY_LIMIT = 20
+
+AUDIT_STATUS = {
+    "ok": ToolCallStatus.OK,
+    "invalid_args": ToolCallStatus.VALIDATION_ERROR,
+    "rejected": ToolCallStatus.REJECTED,
+    "error": ToolCallStatus.ERROR,
+}
 
 
 class ConversationNotFoundError(Exception):
@@ -41,6 +50,24 @@ def _created_lead_id(result: AgentResult) -> int | None:
         if run.name == "create_lead" and run.ok:
             return run.result["lead_id"]
     return None
+
+
+async def _log_tool_runs(
+    session: AsyncSession, *, conversation_id: int, request_id: UUID, runs: list[ToolRun]
+) -> None:
+    for run in runs:
+        await log_tool_call(
+            session,
+            conversation_id=conversation_id,
+            request_id=request_id,
+            step_number=run.step,
+            tool_name=run.name,
+            arguments=run.args,
+            status=AUDIT_STATUS[run.status],
+            duration_ms=run.duration_ms,
+            result=run.result if run.ok else None,
+            error_message=None if run.ok else str(run.result.get("error") or "unknown error"),
+        )
 
 
 async def handle_chat(
@@ -78,6 +105,9 @@ async def handle_chat(
         await session.flush()
     elif lead_id is not None:
         conversation.lead_id = lead_id
+    await _log_tool_runs(
+        session, conversation_id=conversation.id, request_id=uuid4(), runs=result.tool_runs
+    )
     session.add_all(
         [
             DbMessage(conversation_id=conversation.id, role=MessageRole.USER, content=message),
