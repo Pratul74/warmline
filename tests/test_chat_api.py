@@ -3,8 +3,8 @@ from httpx import ASGITransport, AsyncClient
 from sqlalchemy import func, select
 
 from app.api.chat import get_chat_fn
-from app.core.llm import ChatResult, LLMError
-from app.db.models import Conversation, Message
+from app.core.llm import ChatResult, LLMError, ToolCall
+from app.db.models import Conversation, Lead, Message
 from app.db.session import get_session
 from app.main import app
 
@@ -108,3 +108,31 @@ async def test_invalid_messages_are_rejected_before_the_model(client_with):
 
     assert (blank.status_code, too_long.status_code, bad_id.status_code) == (422, 422, 422)
     assert fake.seen == []
+
+
+def lead_call(email: str) -> ChatResult:
+    call = ToolCall(name="create_lead", args={"name": "Robin Fake", "email": email})
+    return ChatResult(text="", tool_calls=[call], input_tokens=1, output_tokens=1)
+
+
+async def test_create_lead_tool_saves_lead_and_links_conversation(client_with, session):
+    fake = ScriptedChat([lead_call("Robin@Example.test"), text("Thanks Robin, we'll be in touch.")])
+    async with client_with(fake) as client:
+        response = await client.post("/chat", json={"message": "I'm Robin, robin@example.test, want a demo"})
+
+    assert response.status_code == 200
+    lead = await session.scalar(select(Lead).where(Lead.email == "robin@example.test"))
+    assert lead is not None and lead.name == "Robin Fake"  # email stored lowercased
+    conversation = await session.get(Conversation, response.json()["conversation_id"])
+    assert conversation.lead_id == lead.id
+    tool_result = fake.seen[1][-1].tool_result
+    assert tool_result == {"lead_id": lead.id, "created": True}
+
+
+async def test_model_failure_after_lead_was_written_rolls_the_lead_back(client_with, session):
+    fake = ScriptedChat([lead_call("rollback@example.test"), LLMError("Model rate limit reached")])
+    async with client_with(fake) as client:
+        response = await client.post("/chat", json={"message": "save me"})
+
+    assert response.status_code == 503
+    assert await session.scalar(select(Lead).where(Lead.email == "rollback@example.test")) is None
