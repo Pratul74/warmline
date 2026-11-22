@@ -13,6 +13,7 @@ class Settings(BaseSettings):
     app_env: Literal["development", "test", "production"] = "development"
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR"] = "INFO"
     db_url: str
+    test_db_url: str | None = None
 
     gemini_api_key: SecretStr
     gemini_model: str
