@@ -6,7 +6,7 @@ from google.genai import errors, types
 
 from app.core import llm
 from app.core.config import get_settings
-from app.core.llm import LLMError, Message, ToolCall, ToolSpec, chat
+from app.core.llm import LLMError, Message, ToolCall, ToolSpec, chat, embed_documents, embed_query
 
 LOOKUP_TOOL = ToolSpec(
     name="get_opening_hours",
@@ -168,3 +168,73 @@ async def test_empty_response_gives_clear_error():
 
     with pytest.raises(LLMError, match="no content"):
         await chat(USER_MSG, [], client=client)
+
+
+# ---- embeddings -----------------------------------------------------------------
+
+
+class FakeEmbedClient:
+    def __init__(self, script: list):
+        self.script = list(script)
+        self.calls: list[dict] = []
+        self.aio = SimpleNamespace(models=SimpleNamespace(embed_content=self._embed))
+
+    async def _embed(self, *, model, contents, config):
+        self.calls.append({"model": model, "contents": contents, "config": config})
+        item = self.script.pop(0)
+        if isinstance(item, Exception):
+            raise item
+        return item
+
+
+def embed_response(*vectors: list[float]) -> types.EmbedContentResponse:
+    return types.EmbedContentResponse(
+        embeddings=[types.ContentEmbedding(values=v) for v in vectors]
+    )
+
+
+def vec(value: float = 0.1) -> list[float]:
+    return [value] * get_settings().embedding_dim
+
+
+async def test_embed_query_sends_task_prefix_model_and_dimension():
+    client = FakeEmbedClient([embed_response(vec())])
+
+    result = await embed_query("Are you open?", client=client)
+
+    assert result == vec()
+    call = client.calls[0]
+    settings = get_settings()
+    assert call["model"] == settings.gemini_embedding_model
+    assert call["config"].output_dimensionality == settings.embedding_dim
+    assert [c.parts[0].text for c in call["contents"]] == ["task: search result | query: Are you open?"]
+
+
+async def test_embed_documents_sends_one_content_per_document_in_one_call():
+    client = FakeEmbedClient([embed_response(vec(0.1), vec(0.2))])
+
+    result = await embed_documents([("Hours?", "9 to 6."), ("Tyres?", "Yes.")], client=client)
+
+    assert result == [vec(0.1), vec(0.2)]
+    assert len(client.calls) == 1
+    assert [c.parts[0].text for c in client.calls[0]["contents"]] == [
+        "title: Hours? | text: 9 to 6.",
+        "title: Tyres? | text: Yes.",
+    ]
+
+
+async def test_embed_wrong_count_or_size_gives_clear_error():
+    one_for_two = FakeEmbedClient([embed_response(vec())])
+    with pytest.raises(LLMError, match="Expected 2 embeddings, got 1"):
+        await embed_documents([("a", "b"), ("c", "d")], client=one_for_two)
+
+    too_short = FakeEmbedClient([embed_response([0.1, 0.2])])
+    with pytest.raises(LLMError, match="Embedding size"):
+        await embed_query("hi", client=too_short)
+
+
+async def test_embed_rate_limit_is_retried_then_succeeds():
+    client = FakeEmbedClient([api_error(429), embed_response(vec())])
+
+    assert await embed_query("hi", client=client) == vec()
+    assert len(client.calls) == 2
