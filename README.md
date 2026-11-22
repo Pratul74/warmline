@@ -22,3 +22,9 @@
   question costs one extra embedding API call. FAQ entries are shared by
   everyone (no per-business owner yet), and editing an answer requires
   re-running the embedding for that entry.
+- If the model sends invalid tool arguments three times for the same tool
+  in one request, the agent stops with a generic "please check your
+  details" reply. Any write already made in that request (such as a saved
+  lead) is kept. Tool errors that are not validation errors (for example,
+  an email that fails the business check) are limited only by the overall
+  step limit.
