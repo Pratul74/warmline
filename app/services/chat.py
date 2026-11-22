@@ -7,8 +7,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.agent.loop import AgentResult, ChatFn, run_agent
 from app.agent.prompts import SYSTEM_PROMPT
-from app.agent.tools import build_tools
-from app.core.llm import LLMError, Message, chat
+from app.agent.tools import EmbedQueryFn, build_tools
+from app.core.llm import LLMError, Message, chat, embed_query
 from app.db.models import Conversation, MessageRole
 from app.db.models import Message as DbMessage
 
@@ -49,6 +49,7 @@ async def handle_chat(
     message: str,
     conversation_id: int | None = None,
     chat_fn: ChatFn = chat,
+    embed_query_fn: EmbedQueryFn = embed_query,
 ) -> ChatTurn:
     conversation: Conversation | None = None
     history: list[Message] = []
@@ -61,7 +62,10 @@ async def handle_chat(
     history.append(Message(role="user", text=message))
     try:
         result = await run_agent(
-            history, build_tools(session), system=SYSTEM_PROMPT, chat_fn=chat_fn
+            history,
+            build_tools(session, embed_query_fn=embed_query_fn),
+            system=SYSTEM_PROMPT,
+            chat_fn=chat_fn,
         )
     except LLMError:
         await session.rollback()
