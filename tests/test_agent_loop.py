@@ -112,6 +112,7 @@ async def test_unknown_tool_is_not_run_and_model_is_told():
 
     run = result.tool_runs[0]
     assert run.ok is False
+    assert run.status == "rejected"
     assert "Unknown tool 'delete_all_leads'" in run.result["error"]
     assert result.reply == "Sorry, I can't do that."
 
