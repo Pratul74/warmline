@@ -28,3 +28,8 @@
   lead) is kept. Tool errors that are not validation errors (for example,
   an email that fails the business check) are limited only by the overall
   step limit.
+- Every tool call is written to the `tool_calls` audit table in the same
+  transaction as the chat messages. If the model fails later in the same
+  request, everything is rolled back, including the audit rows, so that
+  failed request leaves no trace. The audit rows store the tool arguments,
+  which can include customer contact details.
