@@ -7,7 +7,6 @@ dependencies = [
     "asyncpg>=0.32.0",
     "fastapi>=0.165.0",
     "google-genai>=3.6.1",
-    "openai>=3.55.1",
     "pgvector>=0.5.1",
     "pydantic>=2.14.3",
     "pydantic-settings>=2.16.3",
