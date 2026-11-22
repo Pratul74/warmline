@@ -17,6 +17,7 @@ class Settings(BaseSettings):
 
     gemini_api_key: SecretStr
     gemini_model: str
+    gemini_embedding_model: str
     embedding_dim: int
     llm_timeout_seconds: float = Field(default=30.0, gt=0)
 
