@@ -2,9 +2,10 @@ import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy import func, select
 
-from app.api.chat import get_chat_fn
+from app.api.chat import get_chat_fn, get_embed_query_fn
+from app.core.config import get_settings
 from app.core.llm import ChatResult, LLMError, ToolCall
-from app.db.models import Conversation, Lead, Message
+from app.db.models import Conversation, FaqEntry, Lead, Message
 from app.db.session import get_session
 from app.main import app
 
@@ -22,6 +23,10 @@ class ScriptedChat:
         return item
 
 
+async def no_real_embeddings(question: str) -> list[float]:
+    raise RuntimeError("Tests must never call the real embedding API")
+
+
 def text(reply: str) -> ChatResult:
     return ChatResult(text=reply, tool_calls=[], input_tokens=1, output_tokens=1)
 
@@ -32,9 +37,10 @@ async def client_with(session):
     async def override_session():
         yield session
 
-    def build(fake: ScriptedChat) -> AsyncClient:
+    def build(fake: ScriptedChat, embed=no_real_embeddings) -> AsyncClient:
         app.dependency_overrides[get_session] = override_session
         app.dependency_overrides[get_chat_fn] = lambda: fake
+        app.dependency_overrides[get_embed_query_fn] = lambda: embed
         return AsyncClient(transport=ASGITransport(app=app), base_url="http://test")
 
     yield build
@@ -122,7 +128,7 @@ async def test_create_lead_tool_saves_lead_and_links_conversation(client_with, s
 
     assert response.status_code == 200
     lead = await session.scalar(select(Lead).where(Lead.email == "robin@example.test"))
-    assert lead is not None and lead.name == "Robin Fake"  # email stored lowercased
+    assert lead is not None and lead.name == "Robin Fake"
     conversation = await session.get(Conversation, response.json()["conversation_id"])
     assert conversation.lead_id == lead.id
     tool_result = fake.seen[1][-1].tool_result
@@ -136,3 +142,29 @@ async def test_model_failure_after_lead_was_written_rolls_the_lead_back(client_w
 
     assert response.status_code == 503
     assert await session.scalar(select(Lead).where(Lead.email == "rollback@example.test")) is None
+
+
+async def test_search_faq_tool_answer_is_sent_back_to_the_model(client_with, session):
+    vector = [0.0] * get_settings().embedding_dim
+    vector[0] = 1.0
+    session.add(FaqEntry(question="What are your hours?", answer="9am to 6pm.", embedding=vector))
+    await session.flush()
+
+    async def fake_embed(question: str) -> list[float]:
+        return vector
+
+    call = ToolCall(name="search_faq", args={"question": "When are you open?"})
+    fake = ScriptedChat(
+        [
+            ChatResult(text="", tool_calls=[call], input_tokens=1, output_tokens=1),
+            text("We are open 9am to 6pm."),
+        ]
+    )
+    async with client_with(fake, embed=fake_embed) as client:
+        response = await client.post("/chat", json={"message": "When are you open?"})
+
+    assert response.status_code == 200
+    assert response.json()["reply"] == "We are open 9am to 6pm."
+    tool_message = fake.seen[1][-1]
+    assert tool_message.tool_name == "search_faq"
+    assert tool_message.tool_result["matches"][0]["answer"] == "9am to 6pm."
