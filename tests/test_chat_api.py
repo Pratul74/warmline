@@ -5,7 +5,8 @@ from sqlalchemy import func, select
 from app.api.chat import get_chat_fn, get_embed_query_fn
 from app.core.config import get_settings
 from app.core.llm import ChatResult, LLMError, ToolCall
-from app.db.models import Conversation, FaqEntry, Lead, Message
+from app.db.models import Conversation, FaqEntry, Lead, Message, ToolCallStatus
+from app.db.models import ToolCall as ToolCallRow
 from app.db.session import get_session
 from app.main import app
 
@@ -142,6 +143,7 @@ async def test_model_failure_after_lead_was_written_rolls_the_lead_back(client_w
 
     assert response.status_code == 503
     assert await session.scalar(select(Lead).where(Lead.email == "rollback@example.test")) is None
+    assert await count(session, ToolCallRow) == 0
 
 
 async def test_search_faq_tool_answer_is_sent_back_to_the_model(client_with, session):
@@ -168,3 +170,50 @@ async def test_search_faq_tool_answer_is_sent_back_to_the_model(client_with, ses
     tool_message = fake.seen[1][-1]
     assert tool_message.tool_name == "search_faq"
     assert tool_message.tool_result["matches"][0]["answer"] == "9am to 6pm."
+
+
+async def test_every_tool_call_is_written_to_the_audit_log(client_with, session):
+    async def fake_embed(question: str) -> list[float]:
+        return [1.0] + [0.0] * (get_settings().embedding_dim - 1)
+
+    fake = ScriptedChat(
+        [
+            ChatResult(
+                text="",
+                tool_calls=[
+                    ToolCall(name="search_faq", args={"question": "hours?"}),
+                    ToolCall(name="create_lead", args={"name": "No Email"}),
+                ],
+                input_tokens=1,
+                output_tokens=1,
+            ),
+            ChatResult(
+                text="",
+                tool_calls=[ToolCall(name="delete_all_leads", args={})],
+                input_tokens=1,
+                output_tokens=1,
+            ),
+            text("Done."),
+        ]
+    )
+    async with client_with(fake, embed=fake_embed) as client:
+        response = await client.post("/chat", json={"message": "hi"})
+
+    assert response.status_code == 200
+    rows = (
+        await session.scalars(
+            select(ToolCallRow)
+            .where(ToolCallRow.conversation_id == response.json()["conversation_id"])
+            .order_by(ToolCallRow.id)
+        )
+    ).all()
+    assert [(r.step_number, r.tool_name, r.status) for r in rows] == [
+        (1, "search_faq", ToolCallStatus.OK),
+        (1, "create_lead", ToolCallStatus.VALIDATION_ERROR),
+        (2, "delete_all_leads", ToolCallStatus.REJECTED),
+    ]
+    assert len({r.request_id for r in rows}) == 1
+    assert rows[0].result == {"matches": []}
+    assert rows[1].result is None and "email" in rows[1].error_message
+    assert rows[1].arguments == {"name": "No Email"}
+    assert "Unknown tool" in rows[2].error_message
