@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Any, Literal
@@ -21,6 +22,10 @@ INVALID_ARGS_REPLY = (
 ToolHandler = Callable[[Any], Awaitable[dict[str, Any]]]
 ChatFn = Callable[..., Awaitable[ChatResult]]
 
+# "rejected": the tool is not on the allowlist. "invalid_args": the arguments failed
+# validation. "error": the tool crashed or returned {"error": ...}.
+ToolStatus = Literal["ok", "error", "invalid_args", "rejected"]
+
 
 @dataclass
 class Tool:
@@ -38,6 +43,8 @@ class ToolRun:
     args: dict[str, Any]
     result: dict[str, Any]
     ok: bool
+    status: ToolStatus
+    duration_ms: int
 
 
 @dataclass
@@ -52,9 +59,6 @@ class AgentResult:
     gave_up_on_tool: str | None = None
 
 
-ToolStatus = Literal["ok", "error", "invalid_args"]
-
-
 def describe_validation_error(exc: ValidationError) -> str:
     problems = [
         f"{'.'.join(str(part) for part in err['loc']) or 'input'}: {err['msg']}"
@@ -67,7 +71,7 @@ async def run_tool(call: ToolCall, tools: dict[str, Tool]) -> tuple[dict[str, An
     """Check the call against the allowlist and the tool's args_model, then run it."""
     tool = tools.get(call.name)
     if tool is None:
-        return {"error": f"Unknown tool '{call.name}'. Available tools: {sorted(tools)}"}, "error"
+        return {"error": f"Unknown tool '{call.name}'. Available tools: {sorted(tools)}"}, "rejected"
     try:
         args = tool.args_model.model_validate(call.args)
     except ValidationError as exc:
@@ -113,10 +117,20 @@ async def run_agent(
             Message(role="assistant", text=reply.text or None, tool_calls=reply.tool_calls)
         )
         for call in reply.tool_calls:
+            started = time.perf_counter()
             output, status = await run_tool(call, tools)
+            duration_ms = round((time.perf_counter() - started) * 1000)
             messages.append(Message(role="tool", tool_name=call.name, tool_result=output))
             result.tool_runs.append(
-                ToolRun(step=step, name=call.name, args=call.args, result=output, ok=status == "ok")
+                ToolRun(
+                    step=step,
+                    name=call.name,
+                    args=call.args,
+                    result=output,
+                    ok=status == "ok",
+                    status=status,
+                    duration_ms=duration_ms,
+                )
             )
             if status != "invalid_args":
                 continue
