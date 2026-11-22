@@ -1,0 +1,53 @@
+name: tests
+
+on:
+  push:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: warmline
+          POSTGRES_PASSWORD: ci-only-password
+          POSTGRES_DB: warmline_test_db
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U warmline -d warmline_test_db"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+
+    env:
+      APP_ENV: test
+      DB_URL: postgresql+asyncpg://warmline:ci-only-password@localhost:5432/warmline_test_db
+      TEST_DB_URL: postgresql+asyncpg://warmline:ci-only-password@localhost:5432/warmline_test_db
+      GEMINI_API_KEY: dummy-not-a-real-key
+      GEMINI_MODEL: ci-placeholder-model
+      GEMINI_EMBEDDING_MODEL: ci-placeholder-embedding-model
+      EMBEDDING_DIM: "1536"
+      SECRET_KEY: ci-placeholder-secret
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: astral-sh/setup-uv@1db35dd8eee11c5894872e0b383ae6c406cf738d # v10.4.0
+        with:
+          python-version: "3.13"
+          enable-cache: true
+
+      - name: Install dependencies (exact versions from uv.lock)
+        run: uv sync --frozen
+
+      - name: Run tests
+        run: uv run pytest -q
