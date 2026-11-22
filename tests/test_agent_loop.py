@@ -113,6 +113,19 @@ async def test_crashing_tool_reports_generic_error_without_leaking_details():
     assert "hunter2" not in str(fake.seen[1])
 
 
+async def test_handler_error_result_is_marked_not_ok():
+    async def rejects(args: dict) -> dict:
+        return {"error": "email is required"}
+
+    tools = {"rejects": Tool(spec("rejects"), rejects)}
+    fake = ScriptedChat([calls(ToolCall(name="rejects", args={})), text("What's your email?")])
+
+    result = await run_agent(USER, tools, chat_fn=fake)
+
+    assert result.tool_runs[0].ok is False
+    assert result.tool_runs[0].result == {"error": "email is required"}
+
+
 async def test_step_limit_stops_a_model_that_never_answers():
     endless = [calls(ToolCall(name="get_hours", args={"day": "Sat"}))] * 10
     fake = ScriptedChat(endless)
