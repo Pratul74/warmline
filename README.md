@@ -16,3 +16,9 @@
 - `GET /health` includes the raw database error text in its 503 response.
 - `create_lead` saves a lead without asking the customer to confirm it,
   checks only the email's shape, and treats the same email as the same lead.
+- `search_faq` uses a similarity threshold (0.70) chosen from a small live
+  test with fake FAQ data. The gap between right and wrong matches was
+  narrow (0.71 vs 0.68), so it needs checking against real FAQs. Each FAQ
+  question costs one extra embedding API call. FAQ entries are shared by
+  everyone (no per-business owner yet), and editing an answer requires
+  re-running the embedding for that entry.
