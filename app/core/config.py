@@ -5,6 +5,8 @@ from functools import lru_cache
 from typing import Literal
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
+EMBEDDING_DIM = 1536
+
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
         env_file=".env",
@@ -19,7 +21,6 @@ class Settings(BaseSettings):
     gemini_api_key: SecretStr
     gemini_model: str
     gemini_embedding_model: str
-    embedding_dim: int
     llm_timeout_seconds: float = Field(default=30.0, gt=0)
 
     business_timezone: str = "UTC"
