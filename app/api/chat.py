@@ -4,9 +4,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.agent.loop import ChatFn
 from app.agent.tools import EmbedQueryFn
 from app.api.schemas import ChatRequest, ChatResponse
-from app.core.llm import LLMError, chat, embed_query
+from app.core.llm import LLMError, LLMRateLimitError, chat, embed_query
 from app.db.session import get_session
-from app.services.chat import ConversationNotFoundError, handle_chat
+from app.services.chat import ChatStorageError, ConversationNotFoundError, handle_chat
 
 router = APIRouter()
 
@@ -36,6 +36,10 @@ async def post_chat(
         )
     except ConversationNotFoundError:
         raise HTTPException(status_code=404, detail="Conversation not found")
+    except LLMRateLimitError as exc:
+        raise HTTPException(status_code=429, detail=str(exc))
     except LLMError as exc:
         raise HTTPException(status_code=503, detail=str(exc))
+    except ChatStorageError:
+        raise HTTPException(status_code=503, detail="Service temporarily unavailable, please try again")
     return ChatResponse(conversation_id=turn.conversation_id, reply=turn.reply)
