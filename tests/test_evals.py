@@ -16,6 +16,7 @@ from app.db.models import Conversation, FaqEntry, Lead, Slot, ToolCallStatus
 from app.db.models import ToolCall as ToolCallRow
 from app.services.chat import handle_chat
 from app.services.lead import create_lead
+from tests.factories import new_account
 
 OK = ToolCallStatus.OK
 INVALID = ToolCallStatus.VALIDATION_ERROR
@@ -101,11 +102,13 @@ async def run_case(session: AsyncSession, case: EvalCase) -> Outcome:
         await case.setup(session)
 
     model = ScriptedChat(case.script)
+    account = await new_account(session)
     conversation_id = None
     outcome = Outcome(conversation_ids=[], replies=[], model=model)
     for message in case.turns:
         turn = await handle_chat(
             session,
+            account_id=account.id,
             message=message,
             conversation_id=conversation_id,
             chat_fn=model,
