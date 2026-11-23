@@ -30,6 +30,11 @@ class ToolCallStatus(StrEnum):
     REJECTED = "rejected"
     ERROR = "error"
 
+class RequestStatus(StrEnum):
+    OK = "ok"
+    RATE_LIMITED = "rate_limited"
+    MODEL_ERROR = "model_error"
+
 class PendingActionStatus(StrEnum):
     PENDING = "pending"
     CONFIRMED = "confirmed"
@@ -270,8 +275,16 @@ class RequestLog(Base):
         unique=True,
     )
 
-    conversation_id: Mapped[int] = mapped_column(
-        ForeignKey("conversations.id", ondelete="CASCADE")
+    # NULL when the request failed on a new conversation (that row was rolled back).
+    conversation_id: Mapped[int | None] = mapped_column(
+        ForeignKey("conversations.id", ondelete="CASCADE"),
+        nullable=True,
+    )
+
+    status: Mapped[RequestStatus] = mapped_column(
+        enum_column(RequestStatus),
+        nullable=False,
+        server_default=RequestStatus.OK.value,
     )
 
     model: Mapped[str] = mapped_column(String(100), nullable=False)
