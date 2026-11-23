@@ -4,9 +4,10 @@ from httpx import ASGITransport, AsyncClient
 from sqlalchemy import func, select
 from sqlalchemy.exc import OperationalError
 
-from app.agent.loop import FALLBACK_REPLY
+from app.agent.loop import FALLBACK_REPLY, INVALID_ARGS_REPLY
+from app.agent.tools import describe_completed_action
 from app.api.chat import get_chat_fn, get_embed_query_fn
-from app.core.config import get_settings
+from app.core.config import EMBEDDING_DIM, get_settings
 from app.core.llm import ChatResult, LLMError, LLMRateLimitError, ToolCall
 from app.db.models import Conversation, FaqEntry, Lead, Message, RequestLog, ToolCallStatus
 from app.db.models import ToolCall as ToolCallRow
@@ -183,10 +184,22 @@ async def test_model_failure_after_confirming_rolls_back_and_the_action_stays_pe
     assert no_lead_after_failure
     assert retried.status_code == 200
     assert await session.scalar(select(Lead).where(Lead.email == "rollback@example.test")) is not None
+    failed_log = await session.scalar(
+        select(RequestLog).where(RequestLog.conversation_id == conv_id, RequestLog.status != "ok")
+    )
+    confirms = (
+        await session.scalars(
+            select(ToolCallRow.request_id).where(
+                ToolCallRow.conversation_id == conv_id, ToolCallRow.tool_name == "confirm_pending_action"
+            )
+        )
+    ).all()
+    assert failed_log is not None and failed_log.request_id in confirms
+    assert len(confirms) == 2
 
 
 async def test_search_faq_tool_answer_is_sent_back_to_the_model(client_with, session):
-    vector = [0.0] * get_settings().embedding_dim
+    vector = [0.0] * EMBEDDING_DIM
     vector[0] = 1.0
     session.add(FaqEntry(question="What are your hours?", answer="9am to 6pm.", embedding=vector))
     await session.flush()
@@ -213,7 +226,7 @@ async def test_search_faq_tool_answer_is_sent_back_to_the_model(client_with, ses
 
 async def test_every_tool_call_is_written_to_the_audit_log(client_with, session):
     async def fake_embed(question: str) -> list[float]:
-        return [1.0] + [0.0] * (get_settings().embedding_dim - 1)
+        return [1.0] + [0.0] * (EMBEDDING_DIM - 1)
 
     fake = ScriptedChat(
         [
@@ -349,7 +362,7 @@ async def test_step_limit_through_chat_returns_fallback_and_logs_every_step(clie
     monkeypatch.setattr(get_settings(), "agent_max_steps", 3)
 
     async def fake_embed(question: str) -> list[float]:
-        return [1.0] + [0.0] * (get_settings().embedding_dim - 1)
+        return [1.0] + [0.0] * (EMBEDDING_DIM - 1)
 
     fake = ScriptedChat([faq_call(f"question {i}") for i in range(10)])
     async with client_with(fake, embed=fake_embed) as client:
@@ -392,3 +405,83 @@ async def test_crashing_tool_through_chat_is_audited_without_leaking_details(cli
     assert row.error_message == "Tool 'search_faq' failed with an internal error."
     assert secret not in response.text
     assert secret not in (row.error_message or "") and row.result is None
+
+
+def test_completed_actions_are_described_for_the_customer():
+    booked = {"confirmed": "book_slot", "booked": {"start": "2030-01-07T10:00:00+00:00"}, "lead_id": 1}
+    cancelled = {"confirmed": "cancel_booking", "cancelled_booking": {"start": "2030-01-07T16:00:00+05:30"}}
+
+    assert describe_completed_action(booked) == "Your booking for Monday 7 January at 10:00 is confirmed."
+    assert describe_completed_action(cancelled) == "Your booking for Monday 7 January at 16:00 is cancelled."
+    assert describe_completed_action({"confirmed": "create_lead", "lead_id": 1, "created": True}) == (
+        "Your details are saved and the team will be in touch."
+    )
+    assert describe_completed_action({"error": "nothing pending"}) is None
+
+
+async def test_step_limit_after_a_confirmed_booking_still_tells_the_customer(client_with, session, monkeypatch):
+    from datetime import UTC, datetime, timedelta
+
+    from app.db.models import Slot
+
+    monkeypatch.setattr(get_settings(), "business_timezone", "UTC")
+    monkeypatch.setattr(get_settings(), "agent_max_steps", 2)
+    start = (datetime.now(UTC) + timedelta(days=5)).replace(hour=10, minute=0, second=0, microsecond=0)
+    slot = Slot(start_at=start, end_at=start + timedelta(hours=1))
+    session.add(slot)
+    await session.flush()
+    book = ToolCall(
+        name="book_slot",
+        args={
+            "slot_date": start.date().isoformat(),
+            "start_time": "10:00",
+            "name": "Kim Fake",
+            "email": "kim.steps@example.test",
+        },
+    )
+    loop_forever = ToolCall(name="check_availability", args={"start_date": start.date().isoformat()})
+    fake = ScriptedChat(
+        [
+            ChatResult(text="", tool_calls=[book], input_tokens=1, output_tokens=1),
+            text("Shall I book 10:00?"),
+            CONFIRM,
+            ChatResult(text="", tool_calls=[loop_forever], input_tokens=1, output_tokens=1),
+        ]
+    )
+    async with client_with(fake) as client:
+        first = await client.post("/chat", json={"message": "Book me at 10:00, Kim Fake, kim.steps@example.test"})
+        conv_id = first.json()["conversation_id"]
+        second = await client.post("/chat", json={"conversation_id": conv_id, "message": "yes"})
+
+    expected = f"Your booking for {start:%A} {start.day} {start:%B} at 10:00 is confirmed. {FALLBACK_REPLY}"
+    assert second.status_code == 200
+    assert second.json()["reply"] == expected
+    await session.refresh(slot)
+    assert slot.booked_by_lead_id is not None
+    saved = await session.scalar(
+        select(Message).where(Message.conversation_id == conv_id).order_by(Message.id.desc()).limit(1)
+    )
+    assert saved.content == expected
+
+
+async def test_giving_up_after_a_confirmed_lead_still_tells_the_customer(client_with, session):
+    bad_lead = ChatResult(
+        text="", tool_calls=[ToolCall(name="create_lead", args={"name": "No Email"})], input_tokens=1, output_tokens=1
+    )
+    fake = ScriptedChat(
+        [
+            lead_call("giveup@example.test"),
+            text("Shall I save your details?"),
+            CONFIRM,
+            bad_lead,
+            bad_lead,
+            bad_lead,
+        ]
+    )
+    async with client_with(fake) as client:
+        first = await client.post("/chat", json={"message": "save me"})
+        conv_id = first.json()["conversation_id"]
+        second = await client.post("/chat", json={"conversation_id": conv_id, "message": "yes"})
+
+    assert second.json()["reply"] == f"Your details are saved and the team will be in touch. {INVALID_ARGS_REPLY}"
+    assert await session.scalar(select(Lead).where(Lead.email == "giveup@example.test")) is not None
