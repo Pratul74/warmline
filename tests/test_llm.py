@@ -1,12 +1,13 @@
 import asyncio
 from types import SimpleNamespace
 
+import httpx
 import pytest
 from google.genai import errors, types
 
 from app.core import llm
 from app.core.config import get_settings
-from app.core.llm import LLMError, Message, ToolCall, ToolSpec, chat, embed_documents, embed_query
+from app.core.llm import LLMError, LLMRateLimitError, Message, ToolCall, ToolSpec, chat, embed_documents, embed_query
 
 LOOKUP_TOOL = ToolSpec(
     name="get_opening_hours",
@@ -136,7 +137,7 @@ async def test_rate_limit_is_retried_then_succeeds():
 async def test_rate_limit_every_time_gives_clear_error_after_max_attempts():
     client = FakeClient([api_error(429)] * 5)
 
-    with pytest.raises(LLMError, match="rate limit"):
+    with pytest.raises(LLMRateLimitError, match="rate limit"):
         await chat(USER_MSG, [], client=client)
 
     assert len(client.calls) == llm.MAX_ATTEMPTS
@@ -146,6 +147,24 @@ async def test_bad_request_is_not_retried():
     client = FakeClient([api_error(400), make_response(types.Part(text="never reached"))])
 
     with pytest.raises(LLMError, match="status 400"):
+        await chat(USER_MSG, [], client=client)
+
+    assert len(client.calls) == 1
+
+
+async def test_server_error_after_retries_is_not_reported_as_rate_limit():
+    client = FakeClient([api_error(503)] * 5)
+
+    with pytest.raises(LLMError, match="status 503") as info:
+        await chat(USER_MSG, [], client=client)
+
+    assert not isinstance(info.value, LLMRateLimitError)
+
+
+async def test_network_error_becomes_llm_error_without_retry():
+    client = FakeClient([httpx.ConnectError("connection refused"), make_response(types.Part(text="no"))])
+
+    with pytest.raises(LLMError, match="Could not reach the model"):
         await chat(USER_MSG, [], client=client)
 
     assert len(client.calls) == 1
@@ -168,9 +187,6 @@ async def test_empty_response_gives_clear_error():
 
     with pytest.raises(LLMError, match="no content"):
         await chat(USER_MSG, [], client=client)
-
-
-# ---- embeddings -----------------------------------------------------------------
 
 
 class FakeEmbedClient:
