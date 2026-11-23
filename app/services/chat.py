@@ -55,9 +55,9 @@ async def _load_history(session: AsyncSession, conversation_id: int) -> list[Mes
     return [Message(role=row.role.value, text=row.content) for row in reversed(newest_first)]
 
 
-def _created_lead_id(result: AgentResult) -> int | None:
+def _saved_lead_id(result: AgentResult) -> int | None:
     for run in reversed(result.tool_runs):
-        if run.name == "create_lead" and run.ok:
+        if run.name == "confirm_pending_action" and run.ok and "lead_id" in run.result:
             return run.result["lead_id"]
     return None
 
@@ -127,12 +127,16 @@ async def _handle_chat(
         if conversation is None:
             raise ConversationNotFoundError(f"Conversation {conversation_id} not found")
         history = await _load_history(session, conversation_id)
+    else:
+        conversation = Conversation()
+        session.add(conversation)
+        await session.flush()
 
     history.append(Message(role="user", text=message))
     try:
         result = await run_agent(
             history,
-            build_tools(session, embed_query_fn=embed_query_fn),
+            build_tools(session, conversation_id=conversation.id, embed_query_fn=embed_query_fn),
             system=build_system_prompt(now),
             chat_fn=chat_fn,
         )
@@ -140,12 +144,8 @@ async def _handle_chat(
         await _safe_rollback(session)
         raise
 
-    lead_id = _created_lead_id(result)
-    if conversation is None:
-        conversation = Conversation(lead_id=lead_id)
-        session.add(conversation)
-        await session.flush()
-    elif lead_id is not None:
+    lead_id = _saved_lead_id(result)
+    if lead_id is not None:
         conversation.lead_id = lead_id
     await _log_tool_runs(
         session, conversation_id=conversation.id, request_id=uuid4(), runs=result.tool_runs
