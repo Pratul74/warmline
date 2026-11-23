@@ -13,6 +13,7 @@ from app.db.models import Conversation, FaqEntry, Lead, Message, RequestLog, Too
 from app.db.models import ToolCall as ToolCallRow
 from app.db.session import get_session
 from app.main import app
+from tests.factories import auth_headers, new_account
 
 
 class ScriptedChat:
@@ -38,6 +39,7 @@ def text(reply: str) -> ChatResult:
 
 @pytest_asyncio.fixture
 async def client_with(session):
+    headers = auth_headers(await new_account(session))
 
     async def override_session():
         yield session
@@ -46,7 +48,7 @@ async def client_with(session):
         app.dependency_overrides[get_session] = override_session
         app.dependency_overrides[get_chat_fn] = lambda: fake
         app.dependency_overrides[get_embed_query_fn] = lambda: embed
-        return AsyncClient(transport=ASGITransport(app=app), base_url="http://test")
+        return AsyncClient(transport=ASGITransport(app=app), base_url="http://test", headers=headers)
 
     yield build
     app.dependency_overrides.clear()
