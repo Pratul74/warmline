@@ -9,10 +9,11 @@ from app.agent.prompts import build_system_prompt
 from app.agent.tools import MAX_SLOTS_RETURNED, build_tools
 from app.core.config import Settings, get_settings
 from app.core.llm import ChatResult, ToolCall
-from app.db.models import Conversation, Slot
+from app.db.models import Slot
 from app.services.booking import InvalidBookingRequestError, check_availability
 from app.services.chat import handle_chat
 from app.services.lead import create_lead
+from tests.factories import new_account, new_conversation
 
 HOUR = timedelta(hours=1)
 
@@ -75,9 +76,7 @@ async def test_service_rejects_bad_requests(session, kwargs):
 
 
 async def run_check(session, args: dict) -> tuple[dict, str]:
-    conversation = Conversation()
-    session.add(conversation)
-    await session.flush()
+    conversation = await new_conversation(session)
     tools = build_tools(session, conversation_id=conversation.id)
     return await run_tool(ToolCall(name="check_availability", args=args), tools)
 
@@ -156,6 +155,7 @@ async def test_handle_chat_sends_the_dated_prompt_to_the_model(session):
 
     await handle_chat(
         session,
+        account_id=(await new_account(session)).id,
         message="hi",
         chat_fn=fake_chat,
         now=datetime(2026, 12, 1, 8, 0, tzinfo=UTC),
