@@ -35,7 +35,6 @@ jobs:
       GEMINI_API_KEY: dummy-not-a-real-key
       GEMINI_MODEL: ci-placeholder-model
       GEMINI_EMBEDDING_MODEL: ci-placeholder-embedding-model
-      EMBEDDING_DIM: "1536"
       SECRET_KEY: ci-placeholder-secret
 
     steps:
