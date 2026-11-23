@@ -9,7 +9,7 @@ from app.agent.prompts import build_system_prompt
 from app.agent.tools import MAX_SLOTS_RETURNED, build_tools
 from app.core.config import Settings, get_settings
 from app.core.llm import ChatResult, ToolCall
-from app.db.models import Slot
+from app.db.models import Conversation, Slot
 from app.services.booking import InvalidBookingRequestError, check_availability
 from app.services.chat import handle_chat
 from app.services.lead import create_lead
@@ -75,7 +75,11 @@ async def test_service_rejects_bad_requests(session, kwargs):
 
 
 async def run_check(session, args: dict) -> tuple[dict, str]:
-    return await run_tool(ToolCall(name="check_availability", args=args), build_tools(session))
+    conversation = Conversation()
+    session.add(conversation)
+    await session.flush()
+    tools = build_tools(session, conversation_id=conversation.id)
+    return await run_tool(ToolCall(name="check_availability", args=args), tools)
 
 
 async def test_tool_uses_the_business_time_zone_for_the_day(session, monkeypatch):
