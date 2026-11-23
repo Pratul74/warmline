@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
+from datetime import UTC, datetime, timedelta
 
 import pytest
 from sqlalchemy import func, select
@@ -10,7 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.agent.loop import INVALID_ARGS_REPLY
 from app.core.config import get_settings
 from app.core.llm import ChatResult, LLMError, ToolCall
-from app.db.models import Conversation, FaqEntry, Lead, ToolCallStatus
+from app.db.models import Conversation, FaqEntry, Lead, Slot, ToolCallStatus
 from app.db.models import ToolCall as ToolCallRow
 from app.services.chat import handle_chat
 from app.services.lead import create_lead
@@ -159,6 +160,26 @@ async def outage_reported_to_model(session, out: Outcome) -> None:
     assert out.tool_result_sent(1) == {"error": "FAQ search is unavailable right now."}
 
 
+# A day far enough ahead that the slots are never in the past. Tests run with UTC
+# as the business time zone unless BUSINESS_TIMEZONE is set, so slots are built in that zone.
+SLOT_DAY = (datetime.now(UTC) + timedelta(days=10)).date()
+
+
+async def add_free_and_booked_slots(session) -> None:
+    tz = get_settings().business_tz
+    lead = (await create_lead(session, name="Other Fake", email="other.fake@example.test")).lead
+    for hour, booked_by in [(10, None), (13, lead.id), (16, None)]:
+        start = datetime(SLOT_DAY.year, SLOT_DAY.month, SLOT_DAY.day, hour, tzinfo=tz)
+        session.add(Slot(start_at=start, end_at=start + timedelta(hours=1), booked_by_lead_id=booked_by))
+    await session.flush()
+
+
+async def only_free_slots_reached_model(session, out: Outcome) -> None:
+    sent = out.tool_result_sent(1)["slots"]
+    assert [s["start"][11:16] for s in sent] == ["10:00", "16:00"]
+    assert await lead_count(session) == 1  # looking up times saves nothing
+
+
 KIM = {"name": "Kim Fake", "email": "kim.fake@example.test"}
 
 CASES = [
@@ -227,6 +248,18 @@ CASES = [
         expected_reply="Sorry, I can't look that up right now.",
         embedder=embedder_down,
         check=outage_reported_to_model,
+    ),
+    EvalCase(
+        name="availability_lookup",
+        turns=[f"Any free times on {SLOT_DAY.isoformat()} for a service?"],
+        script=[
+            call("check_availability", {"start_date": SLOT_DAY.isoformat()}),
+            say("We have 10:00 or 16:00 free that day."),
+        ],
+        expected_tools=[("check_availability", OK)],
+        expected_reply="We have 10:00 or 16:00 free that day.",
+        setup=add_free_and_booked_slots,
+        check=only_free_slots_reached_model,
     ),
 ]
 
