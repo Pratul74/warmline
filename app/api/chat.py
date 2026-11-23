@@ -3,8 +3,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.agent.loop import ChatFn
 from app.agent.tools import EmbedQueryFn
+from app.api.auth import get_current_account
 from app.api.schemas import ChatRequest, ChatResponse
 from app.core.llm import LLMError, LLMRateLimitError, chat, embed_query
+from app.db.models import Account
 from app.db.session import get_session
 from app.services.chat import ChatStorageError, ConversationNotFoundError, handle_chat
 
@@ -22,6 +24,7 @@ def get_embed_query_fn() -> EmbedQueryFn:
 @router.post("/chat", response_model=ChatResponse)
 async def post_chat(
     body: ChatRequest,
+    account: Account = Depends(get_current_account),
     session: AsyncSession = Depends(get_session),
     chat_fn: ChatFn = Depends(get_chat_fn),
     embed_query_fn: EmbedQueryFn = Depends(get_embed_query_fn),
@@ -29,6 +32,7 @@ async def post_chat(
     try:
         turn = await handle_chat(
             session,
+            account_id=account.id,
             message=body.message,
             conversation_id=body.conversation_id,
             chat_fn=chat_fn,
