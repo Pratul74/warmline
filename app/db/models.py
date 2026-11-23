@@ -46,6 +46,26 @@ def enum_column(enum_cls):
         native_enum=False,
     )
 
+class Account(Base):
+
+    __tablename__ = "accounts"
+    __table_args__ = (
+        Index("uq_accounts_email_lower", text("lower(email)"), unique=True),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    email: Mapped[str] = mapped_column(String(320), nullable=False)
+    password_hash: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    business_name: Mapped[str] = mapped_column(String(200), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        nullable=False,
+    )
+
+    conversations: Mapped[list["Conversation"]] = relationship(back_populates="account")
+
+
 class Lead(Base):
     __tablename__ = "leads"
     __table_args__ = (
@@ -75,9 +95,15 @@ class Conversation(Base):
     __tablename__ = "conversations"
     __table_args__ = (
         Index("ix_conversations_lead_id", "lead_id"),
+        Index("ix_conversations_account_id", "account_id"),
     )
 
     id: Mapped[int] = mapped_column(primary_key=True)
+
+    account_id: Mapped[int] = mapped_column(
+        ForeignKey("accounts.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
 
     lead_id: Mapped[int | None] = mapped_column(
         ForeignKey("leads.id", ondelete="CASCADE"),
@@ -89,6 +115,8 @@ class Conversation(Base):
         server_default=func.now(),
         nullable=False,
     )
+
+    account: Mapped["Account"] = relationship(back_populates="conversations")
 
     lead: Mapped["Lead | None"] = relationship(
         back_populates="conversations"
