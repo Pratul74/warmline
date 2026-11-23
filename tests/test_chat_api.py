@@ -276,3 +276,27 @@ async def test_database_failure_before_the_model_returns_503_without_calling_it(
     assert response.status_code == 503
     assert "10.9.8.7" not in response.text
     assert fake.seen == []
+
+
+async def test_check_availability_runs_through_chat_and_is_audited(client_with, session, monkeypatch):
+    monkeypatch.setattr(get_settings(), "business_timezone", "UTC")
+    from datetime import UTC, datetime, timedelta
+
+    from app.db.models import Slot
+
+    start = (datetime.now(UTC) + timedelta(days=5)).replace(hour=10, minute=0, second=0, microsecond=0)
+    session.add(Slot(start_at=start, end_at=start + timedelta(hours=1)))
+    await session.flush()
+    call = ToolCall(name="check_availability", args={"start_date": start.date().isoformat()})
+    fake = ScriptedChat(
+        [ChatResult(text="", tool_calls=[call], input_tokens=1, output_tokens=1), text("10:00 is free.")]
+    )
+    async with client_with(fake) as client:
+        response = await client.post("/chat", json={"message": "Anything free?"})
+
+    assert response.status_code == 200
+    assert len(fake.seen[1][-1].tool_result["slots"]) == 1
+    row = await session.scalar(
+        select(ToolCallRow).where(ToolCallRow.conversation_id == response.json()["conversation_id"])
+    )
+    assert (row.tool_name, row.status) == ("check_availability", ToolCallStatus.OK)
