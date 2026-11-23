@@ -4,8 +4,9 @@ from app.agent.loop import run_tool
 from app.agent.tools import FAQ_MIN_SIMILARITY, build_tools
 from app.core.config import EMBEDDING_DIM
 from app.core.llm import LLMError, ToolCall
-from app.db.models import Conversation, FaqEntry
+from app.db.models import FaqEntry
 from app.services.lead import InvalidLeadError, create_lead
+from tests.factories import new_conversation
 
 
 async def test_service_creates_new_lead_with_canonical_email(session):
@@ -62,9 +63,7 @@ async def add_faqs(session) -> None:
 
 
 async def run_search(session, args: dict, embed) -> dict:
-    conversation = Conversation()
-    session.add(conversation)
-    await session.flush()
+    conversation = await new_conversation(session)
     tools = build_tools(session, conversation_id=conversation.id, embed_query_fn=embed)
     output, _status = await run_tool(ToolCall(name="search_faq", args=args), tools)
     return output
