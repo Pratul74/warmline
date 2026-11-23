@@ -56,6 +56,18 @@ def _require_name(name: str) -> str:
         raise InvalidLeadError("Lead name must not be empty")
     return clean_name
 
+def clean_lead_fields(
+        *, name: str, email: str, phone: str | None = None, notes: str | None = None
+) -> dict[str, str | None]:
+    canonical_email = canonicalize_email(email)
+    _validate_email(canonical_email)
+    return {
+        "name": _require_name(name),
+        "email": canonical_email,
+        "phone": _clean_optional(phone, field="phone", max_length=MAX_PHONE_LENGTH),
+        "notes": _clean_optional(notes, field="notes"),
+    }
+
 async def create_lead(
         session: AsyncSession,
         *,
@@ -64,17 +76,8 @@ async def create_lead(
         phone: str | None = None,
         notes: str | None = None,
 ) -> CreateLeadResult:
-    canonical_email = canonicalize_email(email)
-    _validate_email(canonical_email)
-    clean_name = _require_name(name)
-
-    insert_stmt = pg_insert(Lead).values(
-        name=clean_name,
-        email=canonical_email,
-        phone=_clean_optional(phone, field="phone", max_length=MAX_PHONE_LENGTH),
-        notes=_clean_optional(notes, field="notes"),
-        status=_INITIAL_STATUS,
-    )
+    fields = clean_lead_fields(name=name, email=email, phone=phone, notes=notes)
+    insert_stmt = pg_insert(Lead).values(**fields, status=_INITIAL_STATUS)
     upsert_stmt = insert_stmt.on_conflict_do_update(
         index_elements=[func.lower(Lead.email)],
         set_={
