@@ -5,6 +5,7 @@ from sqlalchemy import func, select, update
 
 from app.agent.loop import run_tool
 from app.agent.tools import (
+    ALREADY_WAITING_NEXT_STEP,
     NOT_CONFIRMED_YET_ERROR,
     NOTHING_PENDING_ERROR,
     build_tools,
@@ -220,3 +221,46 @@ async def test_confirm_rejects_arguments(session, conversation_id):
     assert status == "invalid_args"
     assert "action_id" in output["error"]
 
+
+async def test_identical_proposal_in_a_later_request_keeps_the_action_and_confirm_works(
+    session, conversation_id
+):
+    await Request(session, conversation_id).call("create_lead", ROBIN)
+
+    yes_turn = Request(session, conversation_id)
+    repeated, _ = await yes_turn.call("create_lead", ROBIN)
+    confirmed, status = await yes_turn.call("confirm_pending_action")
+
+    assert repeated["next_step"] == ALREADY_WAITING_NEXT_STEP
+    assert status == "ok" and confirmed["confirmed"] == "create_lead"
+    assert await lead_count(session) == 1
+    assert await statuses(session, conversation_id) == [PendingActionStatus.CONFIRMED]
+
+
+async def test_changed_proposal_in_a_later_request_still_replaces_and_needs_a_new_yes(
+    session, conversation_id
+):
+    await Request(session, conversation_id).call("create_lead", ROBIN)
+
+    turn = Request(session, conversation_id)
+    changed, _ = await turn.call("create_lead", {**ROBIN, "email": "robin.new@example.test"})
+    refused, _ = await turn.call("confirm_pending_action")
+
+    assert changed["next_step"] != ALREADY_WAITING_NEXT_STEP
+    assert refused == {"error": NOT_CONFIRMED_YET_ERROR}
+    assert await lead_count(session) == 0
+    assert await statuses(session, conversation_id) == [PendingActionStatus.CANCELLED, PENDING]
+
+
+async def test_identical_proposal_twice_in_the_same_request_cannot_be_confirmed(
+    session, conversation_id
+):
+    turn = Request(session, conversation_id)
+    await turn.call("create_lead", ROBIN)
+    repeated, _ = await turn.call("create_lead", ROBIN)
+
+    refused, _ = await turn.call("confirm_pending_action")
+
+    assert repeated["next_step"] != ALREADY_WAITING_NEXT_STEP
+    assert refused == {"error": NOT_CONFIRMED_YET_ERROR}
+    assert await lead_count(session) == 0
