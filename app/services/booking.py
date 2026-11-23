@@ -58,7 +58,7 @@ def _validate_limit(limit: int) -> int:
 
 async def _load_slot_snapshot(session: AsyncSession, slot_id: int) -> _SlotSnapshot | None:
     stmt = (
-        select(Slot, (Slot.start_at<=func.now())).label("is_past")
+        select(Slot, (Slot.start_at <= func.now()).label("is_past"))
         .where(Slot.id == slot_id)
         .execution_options(populate_existing=True)
     )
@@ -69,7 +69,7 @@ async def _load_slot_snapshot(session: AsyncSession, slot_id: int) -> _SlotSnaps
     return _SlotSnapshot(slot=slot, is_past=bool(is_past))
 
 async def _lead_exists(session: AsyncSession, lead_id: int) -> bool:
-    stmt = select(select(Lead.id)).where(Lead.id == lead_id).exists()
+    stmt = select(select(Lead.id).where(Lead.id == lead_id).exists())
     return bool(await session.scalar(stmt))
 
 async def _explain_failed_booking(
@@ -84,7 +84,7 @@ async def _explain_failed_booking(
     if snapshot.is_past:
         raise SlotInPastError(f"Slot {slot_id} has already started")
     if holder_id is not None:
-        raise SlotUnavailableError(f"Lead {lead_id}does not exist")
+        raise SlotUnavailableError(f"Slot {slot_id} is already booked")
     if not await _lead_exists(session, lead_id):
         raise LeadNotFoundError(f"Lead {lead_id} does not exist")
     raise SlotUnavailableError(f"Slot {slot_id} changed concurrently; please retry")
@@ -99,9 +99,15 @@ async def _explain_failed_cancellation(
     if holder_id is None:
         return CancellationResult(slot=snapshot.slot, cancelled=False)
     if holder_id != lead_id:
-        raise BookingNotFoundError(f"Lead {lead_id}has no booking on slot {slot_id}")
+        raise BookingNotFoundError(f"Lead {lead_id} has no booking on slot {slot_id}")
     if snapshot.is_past:
-        raise SlotUnavailableError(f"Slot {slot_id} changed concurrently; please retry")
+        raise SlotInPastError(f"Slot {slot_id} has already started")
+    raise SlotUnavailableError(f"Slot {slot_id} changed concurrently; please retry")
+
+async def find_slot_by_start(session: AsyncSession, start_at: datetime) -> Slot | None:
+    _require_aware(start_at, field="start_at")
+    stmt = select(Slot).where(Slot.start_at == start_at).execution_options(populate_existing=True)
+    return (await session.scalars(stmt)).one_or_none()
 
 async def check_availability(
         session: AsyncSession,
