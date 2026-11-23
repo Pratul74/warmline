@@ -56,6 +56,7 @@ POST /chat {message, conversation_id?}
 - **No double booking.** Booking is one `UPDATE slots SET booked_by_lead_id = ... WHERE id = ... AND booked_by_lead_id IS NULL AND start_at > now()`. If two customers confirm the same slot at once, Postgres makes the second `UPDATE` wait for the first one's row lock and then re-check the condition, so it changes nothing and the customer is told the slot is taken. A test runs this with two real database connections.
 - **Slots are named by date and time, not id.** `book_slot` and `cancel_booking` take the slot's local date and start time, because the conversation history keeps only text and the model no longer has slot ids from an earlier turn.
 - **Audit log in the same transaction.** Each tool call is stored with its arguments, status (`ok`, `validation_error`, `rejected`, `error`), result or error, and duration. It is saved together with the messages, so the log never disagrees with the data.
+- **Cost and latency per request.** Every `/chat` request writes one `request_logs` row: status (`ok`, `rate_limited`, `model_error`), model, steps, input and output tokens, latency and cost. Cost uses `Decimal` and the configured per-1M-token prices. The row shares its `request_id` with the request's `tool_calls` rows. A successful request is logged in the same transaction as its messages; a failed one is logged after the rollback, in its own transaction (with no conversation if the conversation was new). Each request also writes one INFO line to the server log.
 - **Tests never call the API.** The model and the embedder are passed in as functions, and tests pass scripted fakes.
 
 ## Run it locally
@@ -107,7 +108,7 @@ docker compose exec db psql -U warmline -d warmline -c "CREATE DATABASE warmline
 uv run pytest -q
 ```
 
-- **121 tests** run against a real Postgres database, with a fake model and a fake embedder. They cover the LLM wrapper (with a fake SDK client), the agent loop, all seven tools, the confirmation flow, booking (including a two-connection double-booking test), the audit log, the error responses and the `/chat` API.
+- **132 tests** run against a real Postgres database, with a fake model and a fake embedder. They cover the LLM wrapper (with a fake SDK client), the agent loop, all seven tools, the confirmation flow, booking (including a two-connection double-booking test), request cost and latency logging, the audit log, the error responses and the `/chat` API.
 - **14 evals** (`tests/test_evals.py`) are customer-level scenarios run through the real chat service: FAQ hit, FAQ miss, lead captured (with confirmation), lead over several messages, bad arguments then fixed, retry give-up, unknown tool rejected, embedding outage, availability lookup, confirmation in the same turn refused, customer declines, details corrected before confirming, booking confirmed, and book then cancel. Each checks the audit-log rows, the reply and the database.
 - **What the evals do not prove:** the model in them is scripted, so they test how this code handles each model behaviour, not whether Gemini chooses tools well. They don't test the system prompt or the 0.70 similarity threshold. There is no live evaluation against the real model.
 - **CI:** `.github/workflows/tests.yml` runs `uv run pytest -q` on every push and on pull requests to `main`, with a pgvector Postgres service container and placeholder settings (the Gemini key is a dummy, because no test calls the API).
@@ -129,16 +130,24 @@ All settings come from environment variables (or `.env`). See `.env.example`.
 | `BUSINESS_TIMEZONE` | IANA time zone of the business, e.g. `Europe/London` (default `UTC`). Slot times and today's date use it. |
 | `AGENT_MAX_STEPS` | Maximum model calls per request (default 6). |
 | `AGENT_MAX_TOOL_RETRIES` | Retries after an invalid tool call, per tool (default 2, max 2). |
-| `APP_ENV`, `LOG_LEVEL` | Environment name and log level. |
-| `SECRET_KEY`, `ALGORITHM`, `ACCESS_TOKEN_EXPIRE_MINUTES`, `LLM_*_PRICE_PER_1M_TOKENS` | Reserved for later features; not used yet. |
+| `APP_ENV`, `LOG_LEVEL` | Environment name and log level (applied at startup). |
+| `LLM_INPUT_PRICE_PER_1M_TOKENS`, `LLM_OUTPUT_PRICE_PER_1M_TOKENS` | USD prices used to compute `request_logs.cost_usd` (default 0, the free tier). |
+| `SECRET_KEY`, `ALGORITHM`, `ACCESS_TOKEN_EXPIRE_MINUTES` | Reserved for later features; not used yet. |
 
 ## Not built yet
 
-- **Present but not connected:** `app/services/request_logs.py` (empty) and the `request_logs` table (cost and latency logging, planned next).
-- No authentication or per-business accounts, no frontend, no deployment, no cost or latency logging, and no live evaluation set.
+- No authentication or per-business accounts, no frontend, no deployment, no dashboard or endpoint for the request logs, and no live evaluation set.
 
 ## Known limitations
 
+- Request logs: failed requests are logged with 0 tokens, because the agent
+  loop does not report tokens already used when a later model call fails.
+  Embedding calls (FAQ search) are not counted. Latency is measured inside
+  the chat service, so it excludes HTTP and request parsing. Prices are set
+  by hand in the environment. A database failure cannot be logged in the
+  database; it only reaches the server log.
+- At INFO level, the HTTP library also logs each Gemini request URL (the API
+  key is sent in a header, not in the URL).
 - `POST /chat` returns 429 when Gemini's rate limit persists after retries,
   503 for other model failures, and 503 with a generic message for database
   failures (details go to the server log only). The 429 has no `Retry-After`
