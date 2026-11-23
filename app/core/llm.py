@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from functools import lru_cache
@@ -11,6 +12,8 @@ from google.genai import errors, types
 
 from app.core.config import get_settings
 
+logger = logging.getLogger(__name__)
+
 MAX_ATTEMPTS = 3
 RETRY_DELAYS_SECONDS = (1.0, 2.0)
 RETRYABLE_STATUS_CODES = {429, 503}
@@ -20,6 +23,10 @@ T = TypeVar("T")
 
 class LLMError(Exception):
     """The model call failed. The message is safe to show to API callers."""
+
+
+class LLMRateLimitError(LLMError):
+    """The provider kept answering 429 after all retries. The caller should wait and retry."""
 
 
 @dataclass
@@ -152,8 +159,12 @@ async def _call_with_retry(make_call: Callable[[], Awaitable[T]]) -> T:
                 await asyncio.sleep(RETRY_DELAYS_SECONDS[attempt - 1])
                 continue
             if exc.code == 429:
-                raise LLMError("Model rate limit reached, please try again shortly") from exc
+                raise LLMRateLimitError("Model rate limit reached, please try again shortly") from exc
             raise LLMError(f"Model request failed with status {exc.code}") from exc
+
+        except Exception as exc:
+            logger.warning("Model call failed with %s", type(exc).__name__)
+            raise LLMError("Could not reach the model, please try again shortly") from exc
 
     raise AssertionError("unreachable")
 
