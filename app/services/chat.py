@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from uuid import UUID, uuid4
 
@@ -12,7 +13,10 @@ from app.agent.tools import EmbedQueryFn, build_tools
 from app.core.llm import LLMError, Message, chat, embed_query
 from app.db.models import Conversation, MessageRole, ToolCallStatus
 from app.db.models import Message as DbMessage
+from app.db.session import DB_ERRORS
 from app.services.tool_calls import log_tool_call
+
+logger = logging.getLogger(__name__)
 
 HISTORY_LIMIT = 20
 
@@ -26,6 +30,10 @@ AUDIT_STATUS = {
 
 class ConversationNotFoundError(Exception):
     """The client sent a conversation_id that does not exist."""
+
+
+class ChatStorageError(Exception):
+    """The database failed while loading or saving the turn. Nothing from the turn was saved."""
 
 
 @dataclass
@@ -78,6 +86,35 @@ async def handle_chat(
     chat_fn: ChatFn = chat,
     embed_query_fn: EmbedQueryFn = embed_query,
 ) -> ChatTurn:
+    try:
+        return await _handle_chat(
+            session,
+            message=message,
+            conversation_id=conversation_id,
+            chat_fn=chat_fn,
+            embed_query_fn=embed_query_fn,
+        )
+    except DB_ERRORS as exc:
+        logger.exception("Database error while handling a chat turn")
+        await _safe_rollback(session)
+        raise ChatStorageError("Could not load or save the conversation") from exc
+
+
+async def _safe_rollback(session: AsyncSession) -> None:
+    try:
+        await session.rollback()
+    except DB_ERRORS:
+        logger.exception("Rollback failed after a database error")
+
+
+async def _handle_chat(
+    session: AsyncSession,
+    *,
+    message: str,
+    conversation_id: int | None,
+    chat_fn: ChatFn,
+    embed_query_fn: EmbedQueryFn,
+) -> ChatTurn:
     conversation: Conversation | None = None
     history: list[Message] = []
     if conversation_id is not None:
@@ -95,7 +132,7 @@ async def handle_chat(
             chat_fn=chat_fn,
         )
     except LLMError:
-        await session.rollback()
+        await _safe_rollback(session)
         raise
 
     lead_id = _created_lead_id(result)
