@@ -13,7 +13,6 @@ from app.db.models import PendingAction, PendingActionStatus
 DEFAULT_TTL = timedelta(minutes=10)
 MAX_TTL = timedelta(days=1)
 MAX_TOOL_NAME_LENGTH = 100
-DEFAULT_EXPIRE_BATCH_SIZE = 1_000
 
 class PendingActionError(Exception):
     """Base class for expected pending-action failures the caller should handle."""
@@ -119,8 +118,8 @@ async def create_pending_action(
         insert(PendingAction)
         .values(
             conversation_id=conversation_id,
-            tool_name=tool_name,
-            arguments=arguments,
+            tool_name=clean_tool_name,
+            arguments=frozen_arguments,
             status=PendingActionStatus.PENDING,
             expires_at=func.now() + ttl,
         )
@@ -160,7 +159,7 @@ async def claim_pending_action(
         .execution_options(populate_existing=True)
     )
     claimed_action = (await session.scalars(stmt)).one_or_none()
-    if claimed_action is None:
+    if claimed_action is not None:
         return claimed_action
     loaded = await _load_action(session, action_id=action_id, conversation_id=conversation_id)
     if loaded is None:
@@ -196,31 +195,3 @@ async def cancel_pending_action(
     if action.status is PendingActionStatus.CONFIRMED:
         raise PendingActionNotPendingError(action_id, action.status)
     return CancelPendingActionResult(action=action, cancelled=False)
-
-async def expire_old_actions(
-        session: AsyncSession, *, batch_size: int = DEFAULT_EXPIRE_BATCH_SIZE
-) -> int:
-    if batch_size < 1:
-        raise InvalidPendingActionError("batch_size must be at least 1")
-    overdue_ids = (
-        select(PendingAction.id)
-        .where(
-            PendingAction.status == PendingActionStatus.PENDING,
-            PendingAction.expires_at <= func.now(),
-        )
-        .order_by(PendingAction.expires_at)
-        .limit(batch_size)
-        .with_for_update(skip_locked=True)
-    )
-    stmt = (
-        update(PendingAction)
-        .where(
-            PendingAction.id.in_(overdue_ids),
-            PendingAction.status == PendingActionStatus.PENDING,
-        )
-        .values(status=PendingActionStatus.EXPIRED)
-        .execution_options(populate_existing=True)
-    )
-    result = await session.execute(stmt)
-    return result.rowcount
-    
