@@ -82,7 +82,7 @@ def _validate_history_limit(limit: int) -> int:
 async def log_tool_call(
         session: AsyncSession,
         *,
-        conversation_id: int,
+        conversation_id: int | None,
         request_id: UUID,
         step_number: int,
         tool_name: str,
