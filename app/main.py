@@ -5,8 +5,13 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.chat import router as chat_router
+from app.core.config import get_settings
 from app.db.session import DB_ERRORS, get_session
 
+logging.basicConfig(
+    level=get_settings().log_level,
+    format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+)
 logger = logging.getLogger(__name__)
 
 app = FastAPI(
