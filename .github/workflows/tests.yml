@@ -41,13 +41,34 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      - uses: astral-sh/setup-uv@1db35dd8eee11c5894872e0b383ae6c406cf738d # v10.4.0
+      - uses: astral-sh/setup-uv@1db35dd8eee11c5894872e0b383ae6c406cf738d
         with:
           python-version: "3.13"
           enable-cache: true
 
       - name: Install dependencies (exact versions from uv.lock)
         run: uv sync --frozen
+
+      - name: Create an empty database for the migration check
+        run: |
+          uv run python - <<'EOF'
+          import asyncio
+          import asyncpg
+
+          async def main() -> None:
+              conn = await asyncpg.connect("postgresql://warmline:ci-only-password@localhost:5432/warmline_test_db")
+              await conn.execute("CREATE DATABASE warmline_migrations")
+              await conn.close()
+
+          asyncio.run(main())
+          EOF
+
+      - name: Apply all migrations and check they match the models
+        env:
+          DB_URL: postgresql+asyncpg://warmline:ci-only-password@localhost:5432/warmline_migrations
+        run: |
+          uv run alembic upgrade head
+          uv run alembic check
 
       - name: Run tests
         run: uv run pytest -q
