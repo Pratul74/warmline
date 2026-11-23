@@ -7,9 +7,9 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models import Lead, LeadStatus
+from app.services.emails import canonicalize_email, email_problem
 
 MAX_NAME_LENGTH = 200
-MAX_EMAIL_LENGTH = 320
 MAX_PHONE_LENGTH = 32
 
 _INITIAL_STATUS = LeadStatus.NEW
@@ -22,23 +22,10 @@ class CreateLeadResult:
     lead: Lead
     created: bool
 
-def canonicalize_email(email: str) -> str:
-    return email.strip().lower()
-
 def _validate_email(canonical_email: str) -> None:
-    if len(canonical_email)>MAX_EMAIL_LENGTH:
-        raise InvalidLeadError(f"email exceeds {MAX_EMAIL_LENGTH} characters")
-    if canonical_email.count("@")!=1 or any(ch.isspace() for ch in canonical_email):
-        raise InvalidLeadError("Invalid email address")
-    local_part, _, domain = canonical_email.partition("@")
-    domain_is_valid = (
-        "." in domain
-        and not domain.startswith(".")
-        and not domain.endswith(".")
-        and ".." not in domain
-    )
-    if not local_part or not domain_is_valid:
-        raise InvalidLeadError(f"Invalid email address: {canonical_email}")
+    problem = email_problem(canonical_email)
+    if problem is not None:
+        raise InvalidLeadError(problem)
 
 def _clean_optional(value: str | None, *, field: str, max_length: int | None = None) -> str | None:
     if value is None:
