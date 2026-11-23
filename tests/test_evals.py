@@ -9,6 +9,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.agent.loop import INVALID_ARGS_REPLY
+from app.agent.tools import NOT_CONFIRMED_YET_ERROR
 from app.core.config import get_settings
 from app.core.llm import ChatResult, LLMError, ToolCall
 from app.db.models import Conversation, FaqEntry, Lead, Slot, ToolCallStatus
@@ -143,6 +144,21 @@ async def exactly_one_lead(session, out: Outcome) -> None:
     assert "email" in out.tool_result_sent(1)["error"]
 
 
+async def refused_and_nothing_saved(session, out: Outcome) -> None:
+    assert out.tool_result_sent(2) == {"error": NOT_CONFIRMED_YET_ERROR}
+    assert await lead_count(session) == 0
+
+
+async def declined_and_nothing_saved(session, out: Outcome) -> None:
+    assert out.tool_result_sent(3) == {"cancelled": "create_lead"}
+    assert await lead_count(session) == 0
+
+
+async def corrected_email_saved(session, out: Outcome) -> None:
+    emails = list(await session.scalars(select(Lead.email)))
+    assert emails == ["kim.work@example.test"]
+
+
 async def no_lead_saved(session, out: Outcome) -> None:
     assert await lead_count(session) == 0
 
@@ -160,8 +176,6 @@ async def outage_reported_to_model(session, out: Outcome) -> None:
     assert out.tool_result_sent(1) == {"error": "FAQ search is unavailable right now."}
 
 
-# A day far enough ahead that the slots are never in the past. Tests run with UTC
-# as the business time zone unless BUSINESS_TIMEZONE is set, so slots are built in that zone.
 SLOT_DAY = (datetime.now(UTC) + timedelta(days=10)).date()
 
 
@@ -177,7 +191,7 @@ async def add_free_and_booked_slots(session) -> None:
 async def only_free_slots_reached_model(session, out: Outcome) -> None:
     sent = out.tool_result_sent(1)["slots"]
     assert [s["start"][11:16] for s in sent] == ["10:00", "16:00"]
-    assert await lead_count(session) == 1  # looking up times saves nothing
+    assert await lead_count(session) == 1
 
 
 KIM = {"name": "Kim Fake", "email": "kim.fake@example.test"}
@@ -201,25 +215,46 @@ CASES = [
     ),
     EvalCase(
         name="lead_captured",
-        turns=["I'd like a demo. I'm Kim Fake, kim.fake@example.test"],
-        script=[call("create_lead", KIM), say("Thanks Kim, the team will be in touch.")],
-        expected_tools=[("create_lead", OK)],
+        turns=["I'd like a demo. I'm Kim Fake, kim.fake@example.test", "Yes, that's right"],
+        script=[
+            call("create_lead", KIM),
+            say("Shall I save Kim Fake, kim.fake@example.test?"),
+            call("confirm_pending_action"),
+            say("Thanks Kim, the team will be in touch."),
+        ],
+        expected_tools=[("create_lead", OK), ("confirm_pending_action", OK)],
         expected_reply="Thanks Kim, the team will be in touch.",
         check=lead_saved_and_linked,
     ),
     EvalCase(
         name="lead_over_two_turns",
-        turns=["I'd like a call back, I'm Kim Fake", "kim.fake@example.test"],
-        script=[say("Sure! What's your email?"), call("create_lead", KIM), say("Thanks Kim, saved.")],
-        expected_tools=[("create_lead", OK)],
+        turns=["I'd like a call back, I'm Kim Fake", "kim.fake@example.test", "yes"],
+        script=[
+            say("Sure! What's your email?"),
+            call("create_lead", KIM),
+            say("Shall I save these details?"),
+            call("confirm_pending_action"),
+            say("Thanks Kim, saved."),
+        ],
+        expected_tools=[("create_lead", OK), ("confirm_pending_action", OK)],
         expected_reply="Thanks Kim, saved.",
         check=two_turns_one_conversation,
     ),
     EvalCase(
         name="bad_args_then_fixed",
-        turns=["Call me back, Kim Fake, kim.fake@example.test"],
-        script=[call("create_lead", {"name": "Kim Fake"}), call("create_lead", KIM), say("Saved, Kim.")],
-        expected_tools=[("create_lead", INVALID), ("create_lead", OK)],
+        turns=["Call me back, Kim Fake, kim.fake@example.test", "yes"],
+        script=[
+            call("create_lead", {"name": "Kim Fake"}),
+            call("create_lead", KIM),
+            say("Shall I save these details?"),
+            call("confirm_pending_action"),
+            say("Saved, Kim."),
+        ],
+        expected_tools=[
+            ("create_lead", INVALID),
+            ("create_lead", OK),
+            ("confirm_pending_action", OK),
+        ],
         expected_reply="Saved, Kim.",
         check=exactly_one_lead,
     ),
@@ -260,6 +295,54 @@ CASES = [
         expected_reply="We have 10:00 or 16:00 free that day.",
         setup=add_free_and_booked_slots,
         check=only_free_slots_reached_model,
+    ),
+    EvalCase(
+        name="confirm_in_same_turn_refused",
+        turns=["Save me: Kim Fake, kim.fake@example.test"],
+        script=[
+            call("create_lead", KIM),
+            call("confirm_pending_action"),
+            say("Shall I save Kim Fake, kim.fake@example.test?"),
+        ],
+        expected_tools=[("create_lead", OK), ("confirm_pending_action", ERROR)],
+        expected_reply="Shall I save Kim Fake, kim.fake@example.test?",
+        check=refused_and_nothing_saved,
+    ),
+    EvalCase(
+        name="customer_declines",
+        turns=["Call me back, Kim Fake, kim.fake@example.test", "No, don't save anything"],
+        script=[
+            call("create_lead", KIM),
+            say("Shall I save these details?"),
+            call("cancel_pending_action"),
+            say("No problem, nothing was saved."),
+        ],
+        expected_tools=[("create_lead", OK), ("cancel_pending_action", OK)],
+        expected_reply="No problem, nothing was saved.",
+        check=declined_and_nothing_saved,
+    ),
+    EvalCase(
+        name="details_corrected_before_confirming",
+        turns=[
+            "Call me back, Kim Fake, kim.fake@example.test",
+            "Use my work email kim.work@example.test",
+            "yes",
+        ],
+        script=[
+            call("create_lead", KIM),
+            say("Shall I save these details?"),
+            call("create_lead", {"name": "Kim Fake", "email": "kim.work@example.test"}),
+            say("Updated. Shall I save them now?"),
+            call("confirm_pending_action"),
+            say("Saved, Kim."),
+        ],
+        expected_tools=[
+            ("create_lead", OK),
+            ("create_lead", OK),
+            ("confirm_pending_action", OK),
+        ],
+        expected_reply="Saved, Kim.",
+        check=corrected_email_saved,
     ),
 ]
 
