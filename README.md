@@ -32,6 +32,8 @@ POST /chat {message, conversation_id?}
        │                     → send the result back to the model
        └─ save messages + one tool_calls audit row per tool call,
           in one database transaction
+          (if a model call fails: roll back, then save only the audit rows
+           and a failed request_logs row, and return 429/503)
 ```
 
 | Path | Role |
@@ -108,8 +110,8 @@ docker compose exec db psql -U warmline -d warmline -c "CREATE DATABASE warmline
 uv run pytest -q
 ```
 
-- **134 tests** run against a real Postgres database, with a fake model and a fake embedder. They cover the LLM wrapper (with a fake SDK client), the agent loop, all seven tools, the confirmation flow, booking (including a two-connection double-booking test), request cost and latency logging, the audit log, the error responses and the `/chat` API (including the step limit and a crashing tool, end to end).
-- **14 evals** (`tests/test_evals.py`) are customer-level scenarios run through the real chat service: FAQ hit, FAQ miss, lead captured (with confirmation), lead over several messages, bad arguments then fixed, retry give-up, unknown tool rejected, embedding outage, availability lookup, confirmation in the same turn refused, customer declines, details corrected before confirming, booking confirmed, and book then cancel. Each checks the audit-log rows, the reply and the database.
+- **143 tests** run against a real Postgres database, with a fake model and a fake embedder. They cover the LLM wrapper (with a fake SDK client), the agent loop, all seven tools, the confirmation flow, booking (including a two-connection double-booking test), request cost and latency logging, the audit log, the error responses and the `/chat` API (including the step limit and a crashing tool, end to end).
+- **15 evals** (`tests/test_evals.py`) are customer-level scenarios run through the real chat service: FAQ hit, FAQ miss, lead captured (with confirmation), lead over several messages, bad arguments then fixed, retry give-up, unknown tool rejected, embedding outage, availability lookup, confirmation in the same turn refused, customer declines, details corrected before confirming, booking confirmed, booking proposed again on "yes" then confirmed, and book then cancel. Each checks the audit-log rows, the reply and the database.
 - **What the evals do not prove:** the model in them is scripted, so they test how this code handles each model behaviour, not whether Gemini chooses tools well. They don't test the system prompt or the 0.70 similarity threshold. There is no live evaluation against the real model.
 - **CI:** `.github/workflows/tests.yml` runs on every push and on pull requests to `main`, with a pgvector Postgres service container and placeholder settings (the Gemini key is a dummy, because no test calls the API). It first applies every migration to a separate empty database and runs `alembic check`, which fails if a model changed without a migration, then runs `uv run pytest -q`.
 
@@ -125,7 +127,6 @@ All settings come from environment variables (or `.env`). See `.env.example`.
 | `GEMINI_API_KEY` | Google AI Studio key. Never commit it. |
 | `GEMINI_MODEL` | Chat model with function calling. |
 | `GEMINI_EMBEDDING_MODEL` | Embedding model for FAQ search. |
-| `EMBEDDING_DIM` | Embedding size; must match the `faq_entries` column (1536). |
 | `LLM_TIMEOUT_SECONDS` | Timeout for each model call (default 30). |
 | `BUSINESS_TIMEZONE` | IANA time zone of the business, e.g. `Europe/London` (default `UTC`). Slot times and today's date use it. |
 | `AGENT_MAX_STEPS` | Maximum model calls per request (default 6). |
@@ -140,9 +141,7 @@ All settings come from environment variables (or `.env`). See `.env.example`.
 
 ## Known limitations
 
-- Request logs: failed requests are logged with 0 tokens, because the agent
-  loop does not report tokens already used when a later model call fails.
-  Embedding calls (FAQ search) are not counted. Latency is measured inside
+- Request logs: embedding calls (FAQ search) are not counted. Latency is measured inside
   the chat service, so it excludes HTTP and request parsing. Prices are set
   by hand in the environment. A database failure cannot be logged in the
   database; it only reaches the server log.
@@ -190,15 +189,27 @@ All settings come from environment variables (or `.env`). See `.env.example`.
   re-running the embedding for that entry.
 - If the model sends invalid tool arguments three times for the same tool
   in one request, the agent stops with a generic "please check your
-  details" reply. Any write already made in that request (such as a saved
-  lead) is kept. Tool errors that are not validation errors (for example,
+  details" reply. When that reply, or the step-limit reply, follows a
+  confirmed write in the same request, the reply starts with one sentence
+  saying what was saved, booked or cancelled. Tool errors that are not validation errors (for example,
   an email that fails the business check) are limited only by the overall
   step limit.
-- Every tool call is written to the `tool_calls` audit table in the same
-  transaction as the chat messages. If the model fails later in the same
-  request, everything is rolled back, including the audit rows, so that
-  failed request leaves no trace. The audit rows store the tool arguments,
-  which can include customer contact details.
+- Every tool call is written to the `tool_calls` audit table. If a model
+  call fails later in the same request, the request is rolled back (so any
+  write it confirmed is undone) and the audit rows are then saved on their
+  own, linked to the failed `request_logs` row by `request_id`. So an audit
+  row can say `confirm_pending_action ok` for a write that was rolled back:
+  check the request's status in `request_logs`. For a first message the
+  conversation itself is rolled back, so those audit rows have no
+  `conversation_id`. The audit rows store the tool arguments, which can
+  include customer contact details.
+- If the model proposes exactly the same write again when the customer says
+  "yes" (seen live with `book_slot`), the earlier proposal is kept so the
+  confirmation works. A proposal with any changed detail replaces the old
+  one and needs a new "yes".
+- The embedding size (1536) is a constant in `app/core/config.py`, not a
+  setting, because it is part of the database schema. Changing it needs a
+  code change, a migration and re-embedding every FAQ entry.
 - The Docker container runs database migrations every time it starts. That
   is fine for one container; with several copies they should run once as a
   separate task. The API container receives the whole `.env`, including
