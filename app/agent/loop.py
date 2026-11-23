@@ -9,7 +9,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, ValidationError
 
 from app.core.config import get_settings
-from app.core.llm import ChatResult, Message, ToolCall, ToolSpec, chat
+from app.core.llm import ChatResult, LLMError, Message, ToolCall, ToolSpec, chat
 
 logger = logging.getLogger(__name__)
 
@@ -22,8 +22,6 @@ INVALID_ARGS_REPLY = (
 ToolHandler = Callable[[Any], Awaitable[dict[str, Any]]]
 ChatFn = Callable[..., Awaitable[ChatResult]]
 
-# "rejected": the tool is not on the allowlist. "invalid_args": the arguments failed
-# validation. "error": the tool crashed or returned {"error": ...}.
 ToolStatus = Literal["ok", "error", "invalid_args", "rejected"]
 
 
@@ -57,6 +55,7 @@ class AgentResult:
     output_tokens: int = 0
     hit_step_limit: bool = False
     gave_up_on_tool: str | None = None
+    error: LLMError | None = None
 
 
 def describe_validation_error(exc: ValidationError) -> str:
@@ -103,7 +102,11 @@ async def run_agent(
     result = AgentResult(reply="", messages=messages)
 
     for step in range(1, max_steps + 1):
-        reply = await chat_fn(messages, specs, system=system)
+        try:
+            reply = await chat_fn(messages, specs, system=system)
+        except LLMError as exc:
+            result.error = exc
+            return result
         result.steps = step
         result.input_tokens += reply.input_tokens
         result.output_tokens += reply.output_tokens
