@@ -35,7 +35,7 @@ jobs:
       GEMINI_API_KEY: dummy-not-a-real-key
       GEMINI_MODEL: ci-placeholder-model
       GEMINI_EMBEDDING_MODEL: ci-placeholder-embedding-model
-      SECRET_KEY: ci-placeholder-secret
+      SECRET_KEY: ci-placeholder-secret-not-used-anywhere-real
 
     steps:
       - uses: actions/checkout@v7
