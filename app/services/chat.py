@@ -2,14 +2,16 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
+from datetime import datetime
 from uuid import UUID, uuid4
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.agent.loop import AgentResult, ChatFn, ToolRun, run_agent
-from app.agent.prompts import SYSTEM_PROMPT
+from app.agent.prompts import build_system_prompt
 from app.agent.tools import EmbedQueryFn, build_tools
+from app.core.config import get_settings
 from app.core.llm import LLMError, Message, chat, embed_query
 from app.db.models import Conversation, MessageRole, ToolCallStatus
 from app.db.models import Message as DbMessage
@@ -85,6 +87,7 @@ async def handle_chat(
     conversation_id: int | None = None,
     chat_fn: ChatFn = chat,
     embed_query_fn: EmbedQueryFn = embed_query,
+    now: datetime | None = None,
 ) -> ChatTurn:
     try:
         return await _handle_chat(
@@ -93,6 +96,7 @@ async def handle_chat(
             conversation_id=conversation_id,
             chat_fn=chat_fn,
             embed_query_fn=embed_query_fn,
+            now=now or datetime.now(get_settings().business_tz),
         )
     except DB_ERRORS as exc:
         logger.exception("Database error while handling a chat turn")
@@ -114,6 +118,7 @@ async def _handle_chat(
     conversation_id: int | None,
     chat_fn: ChatFn,
     embed_query_fn: EmbedQueryFn,
+    now: datetime,
 ) -> ChatTurn:
     conversation: Conversation | None = None
     history: list[Message] = []
@@ -128,7 +133,7 @@ async def _handle_chat(
         result = await run_agent(
             history,
             build_tools(session, embed_query_fn=embed_query_fn),
-            system=SYSTEM_PROMPT,
+            system=build_system_prompt(now),
             chat_fn=chat_fn,
         )
     except LLMError:
