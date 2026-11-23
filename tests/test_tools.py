@@ -2,7 +2,7 @@ import pytest
 
 from app.agent.loop import run_tool
 from app.agent.tools import FAQ_MIN_SIMILARITY, build_tools
-from app.core.config import get_settings
+from app.core.config import EMBEDDING_DIM
 from app.core.llm import LLMError, ToolCall
 from app.db.models import Conversation, FaqEntry
 from app.services.lead import InvalidLeadError, create_lead
@@ -35,7 +35,7 @@ async def test_service_rejects_invalid_email(session, bad_email):
 
 
 def unit(i: int) -> list[float]:
-    vector = [0.0] * get_settings().embedding_dim
+    vector = [0.0] * EMBEDDING_DIM
     vector[i] = 1.0
     return vector
 
