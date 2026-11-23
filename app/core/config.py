@@ -1,8 +1,9 @@
-from pydantic import Field, SecretStr
+from pydantic import Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from functools import lru_cache
 from typing import Literal
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
@@ -21,6 +22,8 @@ class Settings(BaseSettings):
     embedding_dim: int
     llm_timeout_seconds: float = Field(default=30.0, gt=0)
 
+    business_timezone: str = "UTC"
+
     agent_max_steps: int = Field(default=6, ge=1, le=20)
     agent_max_tool_retries: int = Field(default=2, ge=0, le=2)
 
@@ -30,6 +33,19 @@ class Settings(BaseSettings):
     secret_key: SecretStr
     algorithm: str = "HS256"
     access_token_expire_minutes: int = 30
+
+    @field_validator("business_timezone")
+    @classmethod
+    def _known_timezone(cls, value: str) -> str:
+        try:
+            ZoneInfo(value)
+        except (ZoneInfoNotFoundError, ValueError) as exc:
+            raise ValueError(f"Unknown time zone {value!r}; use an IANA name like 'Europe/London'") from exc
+        return value
+
+    @property
+    def business_tz(self) -> ZoneInfo:
+        return ZoneInfo(self.business_timezone)
 
 @lru_cache
 def get_settings() -> Settings:
