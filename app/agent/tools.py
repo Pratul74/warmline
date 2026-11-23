@@ -61,6 +61,10 @@ NOT_CONFIRMED_YET_ERROR = (
     "The customer has not confirmed yet. Ask them first and wait for their reply."
 )
 ALREADY_HANDLED_ERROR = "That request was already handled or has expired."
+ALREADY_WAITING_NEXT_STEP = (
+    "These exact details are already waiting for confirmation from an earlier message. "
+    "If the customer has agreed, call confirm_pending_action now; do not propose again."
+)
 
 
 class CreateLeadArgs(BaseModel):
@@ -154,11 +158,7 @@ DECLINE_PENDING_ACTION_SPEC = ToolSpec(
 )
 
 
-# A slot as the customer saw it: a local date and start time, not an internal id.
-# The conversation history keeps only text, so on a later turn the model no longer has
-# the slot ids that check_availability returned, but it does have the times it showed.
-# (A comment, not a docstring: Pydantic would send a docstring to the model as the
-# schema description.)
+
 class SlotTimeArgs(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -191,7 +191,6 @@ CANCEL_BOOKING_SPEC = ToolSpec(
 
 
 class BookingAction(BaseModel):
-    """What a proposed booking stores, and what confirm_pending_action later runs."""
 
     slot_id: int
     lead: CreateLeadArgs
@@ -214,11 +213,27 @@ def _describe_slot(slot: Slot) -> dict[str, Any]:
 
 
 def _local_day_window(start_date: date, days: int) -> tuple[datetime, datetime]:
-    """Midnight at the start of start_date to midnight after the last day, in business time."""
     tz = get_settings().business_tz
     start = datetime.combine(start_date, time.min, tzinfo=tz)
     end = datetime.combine(start_date + timedelta(days=days), time.min, tzinfo=tz)
     return start, end
+
+
+def _readable_time(iso_start: str) -> str:
+    start = datetime.fromisoformat(iso_start)
+    return f"{start:%A} {start.day} {start:%B} at {start:%H:%M}"
+
+
+def describe_completed_action(tool_result: dict[str, Any]) -> str | None:
+    confirmed = tool_result.get("confirmed")
+    if confirmed == "create_lead":
+        return "Your details are saved and the team will be in touch."
+    if confirmed == "book_slot":
+        return f"Your booking for {_readable_time(tool_result['booked']['start'])} is confirmed."
+    if confirmed == "cancel_booking":
+        when = _readable_time(tool_result["cancelled_booking"]["start"])
+        return f"Your booking for {when} is cancelled."
+    return None
 
 
 def build_tools(
@@ -253,6 +268,19 @@ def build_tools(
         return await find_slot_by_start(session, start)
 
     async def propose(tool_name: str, details: dict[str, Any]) -> dict[str, Any]:
+        open_action = await get_latest_pending_action(session, conversation_id)
+        if (
+            open_action is not None
+            and open_action.id not in proposed_this_request
+            and open_action.tool_name == tool_name
+            and open_action.arguments == details
+        ):
+            return {
+                "status": "awaiting_confirmation",
+                "action": tool_name,
+                "details": details,
+                "next_step": ALREADY_WAITING_NEXT_STEP,
+            }
         async with session.begin_nested():
             action = await create_pending_action(
                 session, conversation_id=conversation_id, tool_name=tool_name, arguments=details
