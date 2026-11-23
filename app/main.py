@@ -4,6 +4,7 @@ from fastapi import FastAPI, HTTPException, Depends
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.api.auth import router as auth_router
 from app.api.chat import router as chat_router
 from app.core.config import get_settings
 from app.db.session import DB_ERRORS, get_session
@@ -17,6 +18,7 @@ logger = logging.getLogger(__name__)
 app = FastAPI(
     title="Warmline - A Sales and support Agent"
 )
+app.include_router(auth_router)
 app.include_router(chat_router)
 
 @app.get("/")
