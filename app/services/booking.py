@@ -125,7 +125,7 @@ async def check_availability(
         .order_by(Slot.start_at)
         .limit(_validate_limit(limit))
     )
-    return list(await session.scalars(stmt).all())
+    return list((await session.scalars(stmt)).all())
 
 async def book_slot(session: AsyncSession, *, slot_id: int, lead_id: int) -> BookingResult:
     lead_exists = select(Lead.id).where(Lead.id == lead_id).exists()
