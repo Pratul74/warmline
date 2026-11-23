@@ -161,11 +161,16 @@ async def test_empty_model_text_gets_fallback_reply():
     assert result.reply == FALLBACK_REPLY
 
 
-async def test_llm_error_propagates_to_caller():
-    fake = ScriptedChat([LLMError("Model rate limit reached")])
+async def test_llm_error_is_returned_with_the_progress_so_far():
+    error = LLMError("Model rate limit reached")
+    fake = ScriptedChat([calls(ToolCall(name="get_hours", args={"day": "monday"})), error])
 
-    with pytest.raises(LLMError, match="rate limit"):
-        await run_agent(USER, TOOLS, chat_fn=fake)
+    result = await run_agent(USER, TOOLS, chat_fn=fake)
+
+    assert result.error is error
+    assert [run.name for run in result.tool_runs] == ["get_hours"]
+    assert result.steps == 1
+    assert result.input_tokens > 0
 
 
 @pytest.fixture(autouse=True)
