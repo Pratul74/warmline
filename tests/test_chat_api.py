@@ -124,28 +124,64 @@ def lead_call(email: str) -> ChatResult:
     return ChatResult(text="", tool_calls=[call], input_tokens=1, output_tokens=1)
 
 
-async def test_create_lead_tool_saves_lead_and_links_conversation(client_with, session):
-    fake = ScriptedChat([lead_call("Robin@Example.test"), text("Thanks Robin, we'll be in touch.")])
-    async with client_with(fake) as client:
-        response = await client.post("/chat", json={"message": "I'm Robin, robin@example.test, want a demo"})
+CONFIRM = ChatResult(
+    text="", tool_calls=[ToolCall(name="confirm_pending_action", args={})], input_tokens=1, output_tokens=1
+)
 
-    assert response.status_code == 200
+
+async def test_lead_is_saved_only_after_the_customer_confirms(client_with, session):
+    fake = ScriptedChat(
+        [
+            lead_call("Robin@Example.test"),
+            text("Shall I save Robin Fake, robin@example.test?"),
+            CONFIRM,
+            text("Saved. The team will be in touch."),
+        ]
+    )
+    async with client_with(fake) as client:
+        first = await client.post("/chat", json={"message": "I'm Robin, robin@example.test, want a demo"})
+        conv_id = first.json()["conversation_id"]
+        after_first = await session.scalar(select(Lead).where(Lead.email == "robin@example.test"))
+        second = await client.post("/chat", json={"conversation_id": conv_id, "message": "yes"})
+
+    assert (first.status_code, second.status_code) == (200, 200)
+    assert after_first is None
+    proposal = fake.seen[1][-1].tool_result
+    assert proposal["status"] == "awaiting_confirmation"
+    assert proposal["details"]["email"] == "robin@example.test"
     lead = await session.scalar(select(Lead).where(Lead.email == "robin@example.test"))
     assert lead is not None and lead.name == "Robin Fake"
-    conversation = await session.get(Conversation, response.json()["conversation_id"])
+    assert fake.seen[3][-1].tool_result == {"confirmed": "create_lead", "lead_id": lead.id, "created": True}
+    conversation = await session.get(Conversation, conv_id)
     assert conversation.lead_id == lead.id
-    tool_result = fake.seen[1][-1].tool_result
-    assert tool_result == {"lead_id": lead.id, "created": True}
 
 
-async def test_model_failure_after_lead_was_written_rolls_the_lead_back(client_with, session):
-    fake = ScriptedChat([lead_call("rollback@example.test"), LLMError("Model rate limit reached")])
+async def test_model_failure_after_confirming_rolls_back_and_the_action_stays_pending(
+    client_with, session
+):
+    fake = ScriptedChat(
+        [
+            lead_call("rollback@example.test"),
+            text("Shall I save these details?"),
+            CONFIRM,
+            LLMError("Model request failed with status 500"),
+            CONFIRM,
+            text("Saved."),
+        ]
+    )
     async with client_with(fake) as client:
-        response = await client.post("/chat", json={"message": "save me"})
+        first = await client.post("/chat", json={"message": "save me"})
+        conv_id = first.json()["conversation_id"]
+        failed = await client.post("/chat", json={"conversation_id": conv_id, "message": "yes"})
+        no_lead_after_failure = (
+            await session.scalar(select(Lead).where(Lead.email == "rollback@example.test")) is None
+        )
+        retried = await client.post("/chat", json={"conversation_id": conv_id, "message": "yes"})
 
-    assert response.status_code == 503
-    assert await session.scalar(select(Lead).where(Lead.email == "rollback@example.test")) is None
-    assert await count(session, ToolCallRow) == 0
+    assert failed.status_code == 503
+    assert no_lead_after_failure
+    assert retried.status_code == 200
+    assert await session.scalar(select(Lead).where(Lead.email == "rollback@example.test")) is not None
 
 
 async def test_search_faq_tool_answer_is_sent_back_to_the_model(client_with, session):
