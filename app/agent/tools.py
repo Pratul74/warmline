@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
-from datetime import date, datetime, time, timedelta
+from datetime import UTC, date, datetime, time, timedelta
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -10,7 +10,15 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.agent.loop import Tool
 from app.core.config import get_settings
 from app.core.llm import LLMError, ToolSpec, embed_query
-from app.services.booking import InvalidBookingRequestError, check_availability
+from app.db.models import Conversation, Slot
+from app.services.booking import (
+    BookingError,
+    InvalidBookingRequestError,
+    book_slot,
+    cancel_booking,
+    check_availability,
+    find_slot_by_start,
+)
 from app.services.faq import search_faq
 from app.services.lead import (
     MAX_EMAIL_LENGTH,
@@ -43,7 +51,7 @@ WriteFn = Callable[[Any], Awaitable[dict[str, Any]]]
 CONFIRM_NEXT_STEP = (
     "Nothing is saved yet. Read these details back to the customer and ask them to confirm. "
     "In their next message: if they agree, call confirm_pending_action; if they decline, "
-    "call cancel_pending_action; if they correct something, call the tool again with the "
+    "call decline_pending_action; if they correct something, call the tool again with the "
     "corrected details."
 )
 NOTHING_PENDING_ERROR = (
@@ -128,17 +136,81 @@ class NoArgs(BaseModel):
 CONFIRM_PENDING_ACTION_SPEC = ToolSpec(
     name="confirm_pending_action",
     description=(
-        "Carry out the action waiting for confirmation in this conversation (for example, "
-        "saving a lead). Call it only after the customer has clearly agreed in their reply."
+        "Carry out the action waiting for confirmation in this conversation (saving a lead, "
+        "booking a slot or cancelling a booking). Call it only after the customer has "
+        "clearly agreed in their reply, including when they agree to a cancellation."
     ),
     parameters=NoArgs.model_json_schema(),
 )
 
-CANCEL_PENDING_ACTION_SPEC = ToolSpec(
-    name="cancel_pending_action",
-    description="Drop the action waiting for confirmation, when the customer says no.",
+DECLINE_PENDING_ACTION_SPEC = ToolSpec(
+    name="decline_pending_action",
+    description=(
+        "The customer said no to the action waiting for confirmation: drop it without "
+        "doing it. Not for cancelling a booking; a 'yes' to a proposed cancellation is "
+        "confirm_pending_action."
+    ),
     parameters=NoArgs.model_json_schema(),
 )
+
+
+# A slot as the customer saw it: a local date and start time, not an internal id.
+# The conversation history keeps only text, so on a later turn the model no longer has
+# the slot ids that check_availability returned, but it does have the times it showed.
+# (A comment, not a docstring: Pydantic would send a docstring to the model as the
+# schema description.)
+class SlotTimeArgs(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    slot_date: date = Field(description="Day of the slot, as YYYY-MM-DD")
+    start_time: time = Field(description="Start time of the slot in local time, as HH:MM")
+
+
+class BookSlotArgs(SlotTimeArgs, CreateLeadArgs):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+
+BOOK_SLOT_SPEC = ToolSpec(
+    name="book_slot",
+    description=(
+        "Prepare to book a free slot (from check_availability) for a customer. Needs the "
+        "date and start time of the slot plus the name and email of the customer. It does "
+        "not book straight away: it returns the details for the customer to confirm."
+    ),
+    parameters=BookSlotArgs.model_json_schema(),
+)
+
+CANCEL_BOOKING_SPEC = ToolSpec(
+    name="cancel_booking",
+    description=(
+        "Prepare to cancel a booking made in this conversation, given the date and start "
+        "time of the slot. It does not cancel straight away: the customer must confirm."
+    ),
+    parameters=SlotTimeArgs.model_json_schema(),
+)
+
+
+class BookingAction(BaseModel):
+    """What a proposed booking stores, and what confirm_pending_action later runs."""
+
+    slot_id: int
+    lead: CreateLeadArgs
+
+
+class CancelBookingAction(BaseModel):
+    slot_id: int
+    lead_id: int
+
+
+def _describe_slot(slot: Slot) -> dict[str, Any]:
+    tz = get_settings().business_tz
+    start = slot.start_at.astimezone(tz)
+    return {
+        "slot_id": slot.id,
+        "weekday": start.strftime("%A"),
+        "start": start.isoformat(),
+        "end": slot.end_at.astimezone(tz).isoformat(),
+    }
 
 
 def _local_day_window(start_date: date, days: int) -> tuple[datetime, datetime]:
@@ -161,9 +233,24 @@ def build_tools(
         result = await create_lead(session, **args.model_dump())
         return {"lead_id": result.lead.id, "created": result.created}
 
+    async def save_booking(action: BookingAction) -> dict[str, Any]:
+        lead = (await create_lead(session, **action.lead.model_dump())).lead
+        booking = await book_slot(session, slot_id=action.slot_id, lead_id=lead.id)
+        return {"booked": _describe_slot(booking.slot), "lead_id": lead.id}
+
+    async def save_cancellation(action: CancelBookingAction) -> dict[str, Any]:
+        result = await cancel_booking(session, slot_id=action.slot_id, lead_id=action.lead_id)
+        return {"cancelled_booking": _describe_slot(result.slot)}
+
     write_executors: dict[str, tuple[type[BaseModel], WriteFn]] = {
         "create_lead": (CreateLeadArgs, save_lead),
+        "book_slot": (BookingAction, save_booking),
+        "cancel_booking": (CancelBookingAction, save_cancellation),
     }
+
+    async def find_slot(args: SlotTimeArgs) -> Slot | None:
+        start = datetime.combine(args.slot_date, args.start_time, tzinfo=get_settings().business_tz)
+        return await find_slot_by_start(session, start)
 
     async def propose(tool_name: str, details: dict[str, Any]) -> dict[str, Any]:
         async with session.begin_nested():
@@ -185,6 +272,38 @@ def build_tools(
             return {"error": str(exc)}
         return await propose("create_lead", details)
 
+    async def book_slot_handler(args: BookSlotArgs) -> dict[str, Any]:
+        try:
+            lead_fields = clean_lead_fields(
+                name=args.name, email=args.email, phone=args.phone, notes=args.notes
+            )
+        except InvalidLeadError as exc:
+            return {"error": str(exc)}
+        slot = await find_slot(args)
+        if slot is None:
+            return {"error": "There is no slot at that time. Check availability again."}
+        if slot.booked_by_lead_id is not None:
+            return {"error": "That slot is already booked. Check availability again."}
+        if slot.start_at <= datetime.now(UTC):
+            return {"error": "That slot has already started. Check availability again."}
+        response = await propose(
+            "book_slot", BookingAction(slot_id=slot.id, lead=lead_fields).model_dump()
+        )
+        response["details"] = {"slot": _describe_slot(slot), **lead_fields}
+        return response
+
+    async def cancel_booking_handler(args: SlotTimeArgs) -> dict[str, Any]:
+        conversation = await session.get(Conversation, conversation_id)
+        lead_id = conversation.lead_id if conversation else None
+        slot = await find_slot(args)
+        if lead_id is None or slot is None or slot.booked_by_lead_id != lead_id:
+            return {"error": "No booking made in this conversation starts at that time."}
+        response = await propose(
+            "cancel_booking", CancelBookingAction(slot_id=slot.id, lead_id=lead_id).model_dump()
+        )
+        response["details"] = {"slot": _describe_slot(slot)}
+        return response
+
     async def confirm_handler(_: NoArgs) -> dict[str, Any]:
         action = await get_latest_pending_action(session, conversation_id)
         if action is None:
@@ -202,9 +321,11 @@ def build_tools(
                 result = await write(args_model.model_validate(action.arguments))
         except PendingActionError:
             return {"error": ALREADY_HANDLED_ERROR}
+        except BookingError as exc:
+            return {"error": f"{exc}. Check availability again and offer another time."}
         return {"confirmed": action.tool_name, **result}
 
-    async def cancel_handler(_: NoArgs) -> dict[str, Any]:
+    async def decline_handler(_: NoArgs) -> dict[str, Any]:
         action = await get_latest_pending_action(session, conversation_id)
         if action is None:
             return {"status": "nothing_to_cancel"}
@@ -239,18 +360,9 @@ def build_tools(
             )
         except InvalidBookingRequestError as exc:
             return {"error": str(exc)}
-        tz = window_start.tzinfo
         return {
             "timezone": get_settings().business_timezone,
-            "slots": [
-                {
-                    "slot_id": slot.id,
-                    "weekday": slot.start_at.astimezone(tz).strftime("%A"),
-                    "start": slot.start_at.astimezone(tz).isoformat(),
-                    "end": slot.end_at.astimezone(tz).isoformat(),
-                }
-                for slot in slots
-            ],
+            "slots": [_describe_slot(slot) for slot in slots],
         }
 
     return {
@@ -259,6 +371,8 @@ def build_tools(
         "check_availability": Tool(
             CHECK_AVAILABILITY_SPEC, CheckAvailabilityArgs, check_availability_handler
         ),
+        "book_slot": Tool(BOOK_SLOT_SPEC, BookSlotArgs, book_slot_handler),
+        "cancel_booking": Tool(CANCEL_BOOKING_SPEC, SlotTimeArgs, cancel_booking_handler),
         "confirm_pending_action": Tool(CONFIRM_PENDING_ACTION_SPEC, NoArgs, confirm_handler),
-        "cancel_pending_action": Tool(CANCEL_PENDING_ACTION_SPEC, NoArgs, cancel_handler),
+        "decline_pending_action": Tool(DECLINE_PENDING_ACTION_SPEC, NoArgs, decline_handler),
     }
