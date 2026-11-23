@@ -4,10 +4,11 @@ from httpx import ASGITransport, AsyncClient
 from sqlalchemy import func, select
 from sqlalchemy.exc import OperationalError
 
+from app.agent.loop import FALLBACK_REPLY
 from app.api.chat import get_chat_fn, get_embed_query_fn
 from app.core.config import get_settings
 from app.core.llm import ChatResult, LLMError, LLMRateLimitError, ToolCall
-from app.db.models import Conversation, FaqEntry, Lead, Message, ToolCallStatus
+from app.db.models import Conversation, FaqEntry, Lead, Message, RequestLog, ToolCallStatus
 from app.db.models import ToolCall as ToolCallRow
 from app.db.session import get_session
 from app.main import app
@@ -336,3 +337,58 @@ async def test_check_availability_runs_through_chat_and_is_audited(client_with, 
         select(ToolCallRow).where(ToolCallRow.conversation_id == response.json()["conversation_id"])
     )
     assert (row.tool_name, row.status) == ("check_availability", ToolCallStatus.OK)
+
+
+def faq_call(question: str) -> ChatResult:
+    return ChatResult(
+        text="", tool_calls=[ToolCall(name="search_faq", args={"question": question})], input_tokens=1, output_tokens=1
+    )
+
+
+async def test_step_limit_through_chat_returns_fallback_and_logs_every_step(client_with, session, monkeypatch):
+    monkeypatch.setattr(get_settings(), "agent_max_steps", 3)
+
+    async def fake_embed(question: str) -> list[float]:
+        return [1.0] + [0.0] * (get_settings().embedding_dim - 1)
+
+    fake = ScriptedChat([faq_call(f"question {i}") for i in range(10)])
+    async with client_with(fake, embed=fake_embed) as client:
+        response = await client.post("/chat", json={"message": "hours?"})
+
+    assert response.status_code == 200
+    assert response.json()["reply"] == FALLBACK_REPLY
+    assert len(fake.seen) == 3
+    conv_id = response.json()["conversation_id"]
+    rows = (
+        await session.scalars(
+            select(ToolCallRow).where(ToolCallRow.conversation_id == conv_id).order_by(ToolCallRow.id)
+        )
+    ).all()
+    assert [(r.step_number, r.tool_name, r.status) for r in rows] == [
+        (step, "search_faq", ToolCallStatus.OK) for step in (1, 2, 3)
+    ]
+    log = await session.scalar(select(RequestLog).where(RequestLog.conversation_id == conv_id))
+    assert (log.steps, log.input_tokens) == (3, 3)
+
+
+async def test_crashing_tool_through_chat_is_audited_without_leaking_details(client_with, session):
+    secret = "internal-token-abc123 at 10.9.8.7"
+
+    async def crashing_embed(question: str) -> list[float]:
+        raise RuntimeError(secret)
+
+    fake = ScriptedChat([faq_call("hours?"), text("Sorry, I can't look that up right now.")])
+    async with client_with(fake, embed=crashing_embed) as client:
+        response = await client.post("/chat", json={"message": "hours?"})
+
+    assert response.status_code == 200
+    assert response.json()["reply"] == "Sorry, I can't look that up right now."
+    sent_to_model = fake.seen[1][-1].tool_result
+    assert sent_to_model == {"error": "Tool 'search_faq' failed with an internal error."}
+    row = await session.scalar(
+        select(ToolCallRow).where(ToolCallRow.conversation_id == response.json()["conversation_id"])
+    )
+    assert row.status == ToolCallStatus.ERROR
+    assert row.error_message == "Tool 'search_faq' failed with an internal error."
+    assert secret not in response.text
+    assert secret not in (row.error_message or "") and row.result is None
