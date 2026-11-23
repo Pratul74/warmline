@@ -147,9 +147,9 @@ async def test_confirm_in_a_later_request_saves_the_lead_once(session, conversat
 async def test_cancel_drops_the_action_and_nothing_is_saved(session, conversation_id):
     await Request(session, conversation_id).call("create_lead", ROBIN)
 
-    cancelled, _ = await Request(session, conversation_id).call("cancel_pending_action")
+    cancelled, _ = await Request(session, conversation_id).call("decline_pending_action")
     confirm, _ = await Request(session, conversation_id).call("confirm_pending_action")
-    nothing, nothing_status = await Request(session, conversation_id).call("cancel_pending_action")
+    nothing, nothing_status = await Request(session, conversation_id).call("decline_pending_action")
 
     assert cancelled == {"cancelled": "create_lead"}
     assert confirm == {"error": NOTHING_PENDING_ERROR}
