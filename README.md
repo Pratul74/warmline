@@ -2,8 +2,8 @@
 
 A sales and support chat agent for small businesses. A customer sends a
 message; the agent answers questions from the business's FAQ, lists free
-appointment slots, saves interested customers as leads after they confirm, and
-records every tool it runs in an audit log.
+appointment slots, and, after the customer confirms, saves leads and books or
+cancels slots. It records every tool it runs in an audit log.
 
 It uses Google Gemini with native function calling. The agent loop is
 hand-written (no LangChain or other agent framework) and short enough to
@@ -26,8 +26,9 @@ POST /chat {message, conversation_id?}
        │                     → run the tool          app/agent/tools.py
        │                         search_faq  (embedding + pgvector search)
        │                         create_lead (proposes a save; nothing is written)
-       │                         confirm_pending_action / cancel_pending_action
+       │                         confirm_pending_action / decline_pending_action
        │                         check_availability (free slots for given days)
+       │                         book_slot / cancel_booking (propose; nothing is written)
        │                     → send the result back to the model
        └─ save messages + one tool_calls audit row per tool call,
           in one database transaction
@@ -51,7 +52,9 @@ POST /chat {message, conversation_id?}
 - **One module talks to the LLM.** The rest of the app uses small dataclasses (`Message`, `ToolSpec`, `ChatResult`), so the SDK can change in one place and tests can pass in a fake.
 - **Tool inputs are Pydantic models.** The same model generates the JSON schema sent to Gemini and validates what Gemini sends back. Invalid arguments go back to the model as an error. After the first mistake the model gets `AGENT_MAX_TOOL_RETRIES` (2) more tries per tool, then the agent stops with a fixed reply.
 - **Semantic FAQ search.** `gemini-embedding-2` (configured by env) turns questions and FAQ entries into 1536-dimension vectors, and pgvector finds the closest ones. Matches below a cosine similarity of 0.70 are dropped, so the model gets "no matches" instead of a wrong answer.
-- **Confirmation before writes, enforced in code.** A write tool (`create_lead`) only stores a pending action and returns the details for the customer to check. The real write runs when the model calls `confirm_pending_action` in a **later** request, after the customer replied. The code refuses a confirmation of an action proposed in the same request, so the model cannot propose and confirm on its own. The claim is a single `UPDATE ... WHERE status = 'pending' AND not expired`, so a second "yes" cannot save twice. Pending actions expire after 10 minutes; a newer proposal replaces an older one.
+- **Confirmation before writes, enforced in code.** A write tool (`create_lead`, `book_slot`, `cancel_booking`) only stores a pending action and returns the details for the customer to check. The real write runs when the model calls `confirm_pending_action` in a **later** request, after the customer replied. The code refuses a confirmation of an action proposed in the same request, so the model cannot propose and confirm on its own. The claim is a single `UPDATE ... WHERE status = 'pending' AND not expired`, so a second "yes" cannot save twice. Pending actions expire after 10 minutes; a newer proposal replaces an older one.
+- **No double booking.** Booking is one `UPDATE slots SET booked_by_lead_id = ... WHERE id = ... AND booked_by_lead_id IS NULL AND start_at > now()`. If two customers confirm the same slot at once, Postgres makes the second `UPDATE` wait for the first one's row lock and then re-check the condition, so it changes nothing and the customer is told the slot is taken. A test runs this with two real database connections.
+- **Slots are named by date and time, not id.** `book_slot` and `cancel_booking` take the slot's local date and start time, because the conversation history keeps only text and the model no longer has slot ids from an earlier turn.
 - **Audit log in the same transaction.** Each tool call is stored with its arguments, status (`ok`, `validation_error`, `rejected`, `error`), result or error, and duration. It is saved together with the messages, so the log never disagrees with the data.
 - **Tests never call the API.** The model and the embedder are passed in as functions, and tests pass scripted fakes.
 
@@ -104,8 +107,8 @@ docker compose exec db psql -U warmline -d warmline -c "CREATE DATABASE warmline
 uv run pytest -q
 ```
 
-- **105 tests** run against a real Postgres database, with a fake model and a fake embedder. They cover the LLM wrapper (with a fake SDK client), the agent loop, all five tools, the confirmation flow, the audit log, the error responses and the `/chat` API.
-- **12 evals** (`tests/test_evals.py`) are customer-level scenarios run through the real chat service: FAQ hit, FAQ miss, lead captured (with confirmation), lead over several messages, bad arguments then fixed, retry give-up, unknown tool rejected, embedding outage, availability lookup, confirmation in the same turn refused, customer declines, and details corrected before confirming. Each checks the audit-log rows, the reply and the database.
+- **121 tests** run against a real Postgres database, with a fake model and a fake embedder. They cover the LLM wrapper (with a fake SDK client), the agent loop, all seven tools, the confirmation flow, booking (including a two-connection double-booking test), the audit log, the error responses and the `/chat` API.
+- **14 evals** (`tests/test_evals.py`) are customer-level scenarios run through the real chat service: FAQ hit, FAQ miss, lead captured (with confirmation), lead over several messages, bad arguments then fixed, retry give-up, unknown tool rejected, embedding outage, availability lookup, confirmation in the same turn refused, customer declines, details corrected before confirming, booking confirmed, and book then cancel. Each checks the audit-log rows, the reply and the database.
 - **What the evals do not prove:** the model in them is scripted, so they test how this code handles each model behaviour, not whether Gemini chooses tools well. They don't test the system prompt or the 0.70 similarity threshold. There is no live evaluation against the real model.
 - **CI:** `.github/workflows/tests.yml` runs `uv run pytest -q` on every push and on pull requests to `main`, with a pgvector Postgres service container and placeholder settings (the Gemini key is a dummy, because no test calls the API).
 
@@ -131,7 +134,7 @@ All settings come from environment variables (or `.env`). See `.env.example`.
 
 ## Not built yet
 
-- **Present but not connected:** booking and cancelling in `app/services/booking.py` (only availability is used) and `app/services/request_logs.py` (empty), plus the `request_logs` table. They are not used by the agent, booking has known bugs, and both are planned for the next phase.
+- **Present but not connected:** `app/services/request_logs.py` (empty) and the `request_logs` table (cost and latency logging, planned next).
 - No authentication or per-business accounts, no frontend, no deployment, no cost or latency logging, and no live evaluation set.
 
 ## Known limitations
@@ -145,13 +148,18 @@ All settings come from environment variables (or `.env`). See `.env.example`.
   internal error to the model and the model makes one more call before the
   request fails with 503 when saving. That extra model call is wasted. This
   path follows from the code but has no end-to-end test.
-- `check_availability` can only list slots; nothing books them yet. The
-  prompt tells the model to call a chosen time a request, not a booking, but
-  that is an instruction, not a guarantee. It returns at most 10 slots, so a
-  long range shows only the earliest ones. Slots are fake seed data with no
-  owner, and there is no admin path to edit them.
+- `check_availability` returns at most 10 slots, so a long range shows only
+  the earliest ones. Slots are fake seed data with no owner, and there is no
+  admin path to edit them. There is no rescheduling tool (cancel, then book).
+- `cancel_booking` only cancels bookings of the lead linked to the current
+  conversation. Because conversation ids are guessable (next point), someone
+  who guesses an id could cancel that conversation's booking.
+- If a slot is taken between the proposal and the "yes", nothing is saved
+  and the pending action stays pending; the model is told to offer another
+  time.
 - `POST /chat` uses sequential conversation ids with no ownership check, so
-  anyone who guesses an id can continue that conversation. This is
+  anyone who guesses an id can continue that conversation, including
+  confirming or cancelling its bookings. This is
   acceptable only for local demos with fake data.
 - A database connection is held while waiting for the model, so many slow
   model calls at once can exhaust the connection pool.
