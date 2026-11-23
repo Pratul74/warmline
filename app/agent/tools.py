@@ -19,9 +19,9 @@ from app.services.booking import (
     check_availability,
     find_slot_by_start,
 )
+from app.services.emails import MAX_EMAIL_LENGTH
 from app.services.faq import search_faq
 from app.services.lead import (
-    MAX_EMAIL_LENGTH,
     MAX_NAME_LENGTH,
     MAX_PHONE_LENGTH,
     InvalidLeadError,
