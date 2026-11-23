@@ -10,7 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.agent.loop import INVALID_ARGS_REPLY
 from app.agent.tools import NOT_CONFIRMED_YET_ERROR
-from app.core.config import get_settings
+from app.core.config import EMBEDDING_DIM, get_settings
 from app.core.llm import ChatResult, LLMError, ToolCall
 from app.db.models import Conversation, FaqEntry, Lead, Slot, ToolCallStatus
 from app.db.models import ToolCall as ToolCallRow
@@ -45,7 +45,7 @@ def call(tool: str, args: dict | None = None) -> ChatResult:
 
 
 def unit(i: int) -> list[float]:
-    vector = [0.0] * get_settings().embedding_dim
+    vector = [0.0] * EMBEDDING_DIM
     vector[i] = 1.0
     return vector
 
@@ -386,6 +386,33 @@ CASES = [
             say("Booked! See you at 10:00."),
         ],
         expected_tools=[("book_slot", OK), ("confirm_pending_action", OK)],
+        expected_reply="Booked! See you at 10:00.",
+        setup=add_free_slot_at_10,
+        check=booked_for_kim_and_linked,
+    ),
+    EvalCase(
+        # Seen live: on "yes" the model proposed the same booking again (twice) instead of
+        # confirming. The repeat must not replace the earlier proposal, so confirm works.
+        name="booking_repeated_on_yes_then_confirmed",
+        turns=[f"Book me in at 10:00 on {SLOT_DAY.isoformat()}. Kim Fake, kim.fake@example.test", "yes"],
+        script=[
+            call("book_slot", BOOK_KIM_AT_10),
+            say("Shall I book 10:00 for Kim Fake?"),
+            ChatResult(
+                text="",
+                tool_calls=[ToolCall(name="book_slot", args=BOOK_KIM_AT_10)] * 2,
+                input_tokens=1,
+                output_tokens=1,
+            ),
+            call("confirm_pending_action"),
+            say("Booked! See you at 10:00."),
+        ],
+        expected_tools=[
+            ("book_slot", OK),
+            ("book_slot", OK),
+            ("book_slot", OK),
+            ("confirm_pending_action", OK),
+        ],
         expected_reply="Booked! See you at 10:00.",
         setup=add_free_slot_at_10,
         check=booked_for_kim_and_linked,
