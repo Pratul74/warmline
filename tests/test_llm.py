@@ -6,7 +6,7 @@ import pytest
 from google.genai import errors, types
 
 from app.core import llm
-from app.core.config import get_settings
+from app.core.config import EMBEDDING_DIM, get_settings
 from app.core.llm import LLMError, LLMRateLimitError, Message, ToolCall, ToolSpec, chat, embed_documents, embed_query
 
 LOOKUP_TOOL = ToolSpec(
@@ -210,7 +210,7 @@ def embed_response(*vectors: list[float]) -> types.EmbedContentResponse:
 
 
 def vec(value: float = 0.1) -> list[float]:
-    return [value] * get_settings().embedding_dim
+    return [value] * EMBEDDING_DIM
 
 
 async def test_embed_query_sends_task_prefix_model_and_dimension():
@@ -222,7 +222,7 @@ async def test_embed_query_sends_task_prefix_model_and_dimension():
     call = client.calls[0]
     settings = get_settings()
     assert call["model"] == settings.gemini_embedding_model
-    assert call["config"].output_dimensionality == settings.embedding_dim
+    assert call["config"].output_dimensionality == EMBEDDING_DIM
     assert [c.parts[0].text for c in call["contents"]] == ["task: search result | query: Are you open?"]
 
 
