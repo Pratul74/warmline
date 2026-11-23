@@ -11,13 +11,14 @@ from app.agent.tools import (
     build_tools,
 )
 from app.core.llm import ToolCall
-from app.db.models import Conversation, Lead, PendingAction, PendingActionStatus
+from app.db.models import Lead, PendingAction, PendingActionStatus
 from app.services.pending_actions import (
     PendingActionExpiredError,
     PendingActionNotPendingError,
     claim_pending_action,
     create_pending_action,
 )
+from tests.factories import new_conversation
 
 PENDING = PendingActionStatus.PENDING
 ROBIN = {"name": " Robin Fake ", "email": "Robin@Example.TEST"}
@@ -25,9 +26,7 @@ ROBIN = {"name": " Robin Fake ", "email": "Robin@Example.TEST"}
 
 @pytest.fixture
 async def conversation_id(session) -> int:
-    conversation = Conversation()
-    session.add(conversation)
-    await session.flush()
+    conversation = await new_conversation(session)
     return conversation.id
 
 
@@ -186,9 +185,7 @@ async def test_expired_action_cannot_be_confirmed(session, conversation_id):
 
 
 async def test_another_conversation_cannot_confirm(session, conversation_id):
-    other = Conversation()
-    session.add(other)
-    await session.flush()
+    other = await new_conversation(session)
     await Request(session, conversation_id).call("create_lead", ROBIN)
 
     output, _ = await Request(session, other.id).call("confirm_pending_action")
