@@ -7,8 +7,12 @@ from sqlalchemy.ext.asyncio import (
     async_sessionmaker,
     create_async_engine,
 )
+from sqlalchemy.exc import SQLAlchemyError
 
 from app.core.config import get_settings
+
+
+DB_ERRORS: tuple[type[Exception], ...] = (SQLAlchemyError, OSError)
 
 @lru_cache
 def get_engine() -> AsyncEngine:
