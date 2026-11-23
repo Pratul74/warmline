@@ -1,15 +1,15 @@
 # Warmline
 
 A sales and support chat agent for small businesses. A customer sends a
-message; the agent answers questions from the business's FAQ, saves
-interested customers as leads, and records every tool it runs in an audit
+message; the agent answers questions from the business's FAQ, lists free
+appointment slots, saves interested customers as leads, and records every tool it runs in an audit
 log.
 
 It uses Google Gemini with native function calling. The agent loop is
 hand-written (no LangChain or other agent framework) and short enough to
 read in one sitting.
 
-All data in this repo (FAQ entries, names, emails) is fake.
+All data in this repo (FAQ entries, slots, names, emails) is fake.
 
 ## How a request flows
 
@@ -26,6 +26,7 @@ POST /chat {message, conversation_id?}
        │                     → run the tool          app/agent/tools.py
        │                         search_faq  (embedding + pgvector search)
        │                         create_lead (insert or reuse by email)
+       │                         check_availability (free slots for given days)
        │                     → send the result back to the model
        └─ save messages + one tool_calls audit row per tool call,
           in one database transaction
@@ -36,12 +37,12 @@ POST /chat {message, conversation_id?}
 | `app/core/llm.py` | The only module that imports the Gemini SDK: `chat()`, `embed_query()`, `embed_documents()`, with a timeout and limited retry on 429/503. |
 | `app/agent/loop.py` | The agent loop, the tool allowlist, argument validation and the retry cap. |
 | `app/agent/tools.py` | Tool definitions: a Pydantic input model + handler for each tool. |
-| `app/agent/prompts.py` | The system prompt. |
-| `app/services/` | Business logic: chat orchestration, leads, FAQ search, the audit log. |
+| `app/agent/prompts.py` | The system prompt, with today's date added on each request. |
+| `app/services/` | Business logic: chat orchestration, leads, FAQ search, slot availability, the audit log. |
 | `app/api/` | The thin FastAPI route and request/response schemas. |
 | `app/db/` | SQLAlchemy models and the database session. |
 | `migrations/` | Alembic migrations. |
-| `scripts/` | `seed_faq.py` (fake FAQ data), `smoke_gemini.py` (a one-off Gemini function-calling check). |
+| `scripts/` | `seed_faq.py` (fake FAQ data), `seed_slots.py` (fake slots for the next 14 days), `smoke_gemini.py` (a one-off Gemini function-calling check). |
 
 ## Key design decisions
 
@@ -63,6 +64,7 @@ docker compose up -d db              # Postgres 16 + pgvector on 127.0.0.1:5433
 uv sync                              # install dependencies from uv.lock
 uv run alembic upgrade head          # create the tables
 uv run python -m scripts.seed_faq    # 8 fake FAQ entries (one embedding API call)
+uv run python -m scripts.seed_slots  # fake slots, Mon-Sat 10:00/13:00/16:00, next 14 days
 uv run uvicorn app.main:app --reload
 ```
 
@@ -87,8 +89,8 @@ This builds the API image and starts it next to Postgres on
 `127.0.0.1:8000`. The container runs `alembic upgrade head` before starting
 the server. The API key reaches the container at run time through
 `env_file: .env`; `.env` is excluded from the image by `.dockerignore`. To
-load the fake FAQ entries, run `uv run python -m scripts.seed_faq` from the
-host (the scripts are not in the image).
+load the fake FAQ entries and slots, run `uv run python -m scripts.seed_faq` and
+`uv run python -m scripts.seed_slots` from the host (the scripts are not in the image).
 
 ## Tests, evals and CI
 
@@ -100,8 +102,8 @@ docker compose exec db psql -U warmline -d warmline -c "CREATE DATABASE warmline
 uv run pytest -q
 ```
 
-- **66 tests** run against a real Postgres database, with a fake model and a fake embedder. They cover the LLM wrapper (with a fake SDK client), the agent loop, both tools, the audit log and the `/chat` API.
-- **8 evals** (`tests/test_evals.py`) are customer-level scenarios run through the real chat service: FAQ hit, FAQ miss, lead captured, lead over two messages, bad arguments then fixed, retry give-up, unknown tool rejected, and embedding outage. Each checks the audit-log rows, the reply and the database.
+- **93 tests** run against a real Postgres database, with a fake model and a fake embedder. They cover the LLM wrapper (with a fake SDK client), the agent loop, all three tools, the audit log, the error responses and the `/chat` API.
+- **9 evals** (`tests/test_evals.py`) are customer-level scenarios run through the real chat service: FAQ hit, FAQ miss, lead captured, lead over two messages, bad arguments then fixed, retry give-up, unknown tool rejected, embedding outage, and availability lookup. Each checks the audit-log rows, the reply and the database.
 - **What the evals do not prove:** the model in them is scripted, so they test how this code handles each model behaviour, not whether Gemini chooses tools well. They don't test the system prompt or the 0.70 similarity threshold. There is no live evaluation against the real model.
 - **CI:** `.github/workflows/tests.yml` runs `uv run pytest -q` on every push and on pull requests to `main`, with a pgvector Postgres service container and placeholder settings (the Gemini key is a dummy, because no test calls the API).
 
@@ -119,6 +121,7 @@ All settings come from environment variables (or `.env`). See `.env.example`.
 | `GEMINI_EMBEDDING_MODEL` | Embedding model for FAQ search. |
 | `EMBEDDING_DIM` | Embedding size; must match the `faq_entries` column (1536). |
 | `LLM_TIMEOUT_SECONDS` | Timeout for each model call (default 30). |
+| `BUSINESS_TIMEZONE` | IANA time zone of the business, e.g. `Europe/London` (default `UTC`). Slot times and today's date use it. |
 | `AGENT_MAX_STEPS` | Maximum model calls per request (default 6). |
 | `AGENT_MAX_TOOL_RETRIES` | Retries after an invalid tool call, per tool (default 2, max 2). |
 | `APP_ENV`, `LOG_LEVEL` | Environment name and log level. |
@@ -126,7 +129,7 @@ All settings come from environment variables (or `.env`). See `.env.example`.
 
 ## Not built yet
 
-- **Present but not connected:** `app/services/booking.py` (availability and booking), `app/services/pending_actions.py` (confirmation before writes) and `app/services/request_logs.py` (empty), plus their tables (`slots`, `pending_actions`, `request_logs`). They are not used by the agent, have known bugs, and are planned for the next phase.
+- **Present but not connected:** booking and cancelling in `app/services/booking.py` (only availability is used), `app/services/pending_actions.py` (confirmation before writes) and `app/services/request_logs.py` (empty), plus their tables (`slots`, `pending_actions`, `request_logs`). They are not used by the agent, have known bugs, and are planned for the next phase.
 - No authentication or per-business accounts, no frontend, no deployment, no cost or latency logging, and no live evaluation set.
 
 ## Known limitations
@@ -140,6 +143,11 @@ All settings come from environment variables (or `.env`). See `.env.example`.
   internal error to the model and the model makes one more call before the
   request fails with 503 when saving. That extra model call is wasted. This
   path follows from the code but has no end-to-end test.
+- `check_availability` can only list slots; nothing books them yet. The
+  prompt tells the model to call a chosen time a request, not a booking, but
+  that is an instruction, not a guarantee. It returns at most 10 slots, so a
+  long range shows only the earliest ones. Slots are fake seed data with no
+  owner, and there is no admin path to edit them.
 - `POST /chat` uses sequential conversation ids with no ownership check, so
   anyone who guesses an id can continue that conversation. This is
   acceptable only for local demos with fake data.
