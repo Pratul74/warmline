@@ -33,7 +33,7 @@ AUDIT_STATUS = {
 
 
 class ConversationNotFoundError(Exception):
-    """The client sent a conversation_id that does not exist."""
+    """The conversation does not exist or belongs to another account (the caller cannot tell which)."""
 
 
 class ChatStorageError(Exception):
@@ -97,6 +97,7 @@ async def _log_tool_runs(
 async def handle_chat(
     session: AsyncSession,
     *,
+    account_id: int,
     message: str,
     conversation_id: int | None = None,
     chat_fn: ChatFn = chat,
@@ -106,6 +107,7 @@ async def handle_chat(
     try:
         return await _handle_chat(
             session,
+            account_id=account_id,
             message=message,
             conversation_id=conversation_id,
             chat_fn=chat_fn,
@@ -166,6 +168,7 @@ async def _safe_rollback(session: AsyncSession) -> None:
 async def _handle_chat(
     session: AsyncSession,
     *,
+    account_id: int,
     message: str,
     conversation_id: int | None,
     chat_fn: ChatFn,
@@ -178,11 +181,11 @@ async def _handle_chat(
     history: list[Message] = []
     if conversation_id is not None:
         conversation = await session.get(Conversation, conversation_id)
-        if conversation is None:
+        if conversation is None or conversation.account_id != account_id:
             raise ConversationNotFoundError(f"Conversation {conversation_id} not found")
         history = await _load_history(session, conversation_id)
     else:
-        conversation = Conversation()
+        conversation = Conversation(account_id=account_id)
         session.add(conversation)
         await session.flush()
 
