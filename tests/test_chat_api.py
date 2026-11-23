@@ -1,10 +1,12 @@
+import pytest
 import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy import func, select
+from sqlalchemy.exc import OperationalError
 
 from app.api.chat import get_chat_fn, get_embed_query_fn
 from app.core.config import get_settings
-from app.core.llm import ChatResult, LLMError, ToolCall
+from app.core.llm import ChatResult, LLMError, LLMRateLimitError, ToolCall
 from app.db.models import Conversation, FaqEntry, Lead, Message, ToolCallStatus
 from app.db.models import ToolCall as ToolCallRow
 from app.db.session import get_session
@@ -96,12 +98,12 @@ async def test_unknown_conversation_returns_404_without_calling_model(client_wit
 async def test_model_failure_returns_503_and_saves_nothing(client_with, session):
     conversations_before = await count(session, Conversation)
     messages_before = await count(session, Message)
-    fake = ScriptedChat([LLMError("Model rate limit reached, please try again shortly")])
+    fake = ScriptedChat([LLMError("Model request failed with status 500")])
     async with client_with(fake) as client:
         response = await client.post("/chat", json={"message": "hi"})
 
     assert response.status_code == 503
-    assert "rate limit" in response.json()["detail"]
+    assert response.json()["detail"] == "Model request failed with status 500"
     assert await count(session, Conversation) == conversations_before
     assert await count(session, Message) == messages_before
 
@@ -217,3 +219,60 @@ async def test_every_tool_call_is_written_to_the_audit_log(client_with, session)
     assert rows[1].result is None and "email" in rows[1].error_message
     assert rows[1].arguments == {"name": "No Email"}
     assert "Unknown tool" in rows[2].error_message
+
+
+async def test_rate_limit_returns_429_and_saves_nothing(client_with, session):
+    conversations_before = await count(session, Conversation)
+    fake = ScriptedChat([LLMRateLimitError("Model rate limit reached, please try again shortly")])
+    async with client_with(fake) as client:
+        response = await client.post("/chat", json={"message": "hi"})
+
+    assert response.status_code == 429
+    assert "rate limit" in response.json()["detail"]
+    assert await count(session, Conversation) == conversations_before
+
+
+def db_down(statement: str) -> OperationalError:
+    return OperationalError(statement, {}, Exception("connection to server at 10.9.8.7 port 5432 lost"))
+
+
+async def test_database_failure_on_save_returns_clean_503_and_saves_nothing(
+    client_with, session, monkeypatch
+):
+    conversations_before = await count(session, Conversation)
+    messages_before = await count(session, Message)
+
+    async def failing_commit():
+        raise db_down("COMMIT")
+
+    monkeypatch.setattr(session, "commit", failing_commit)
+    fake = ScriptedChat([lead_call("dbdown@example.test"), text("Saved!")])
+    async with client_with(fake) as client:
+        response = await client.post("/chat", json={"message": "save me"})
+
+    assert response.status_code == 503
+    assert response.json() == {"detail": "Service temporarily unavailable, please try again"}
+    assert "10.9.8.7" not in response.text and "COMMIT" not in response.text
+    assert await count(session, Conversation) == conversations_before
+    assert await count(session, Message) == messages_before
+    assert await session.scalar(select(Lead).where(Lead.email == "dbdown@example.test")) is None
+
+
+@pytest.mark.parametrize(
+    "error",
+    [db_down("SELECT conversations"), ConnectionRefusedError("connect to 10.9.8.7 refused")],
+)
+async def test_database_failure_before_the_model_returns_503_without_calling_it(
+    client_with, session, monkeypatch, error
+):
+    async def failing_get(*args, **kwargs):
+        raise error
+
+    monkeypatch.setattr(session, "get", failing_get)
+    fake = ScriptedChat([])
+    async with client_with(fake) as client:
+        response = await client.post("/chat", json={"conversation_id": 1, "message": "hi"})
+
+    assert response.status_code == 503
+    assert "10.9.8.7" not in response.text
+    assert fake.seen == []
