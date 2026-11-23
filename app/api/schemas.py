@@ -15,3 +15,26 @@ class ChatRequest(BaseModel):
 class ChatResponse(BaseModel):
     conversation_id: int
     reply: str
+
+
+class RegisterRequest(BaseModel):
+    email: Annotated[str, StringConstraints(max_length=320)]
+    password: Annotated[str, StringConstraints(max_length=128)]
+    business_name: Annotated[str, StringConstraints(max_length=200)]
+
+
+class LoginRequest(BaseModel):
+    email: Annotated[str, StringConstraints(max_length=320)]
+    password: Annotated[str, StringConstraints(max_length=128)]
+
+
+class TokenResponse(BaseModel):
+    access_token: str
+    token_type: str = "bearer"
+    expires_in: int
+
+
+class AccountResponse(BaseModel):
+    id: int
+    email: str
+    business_name: str
