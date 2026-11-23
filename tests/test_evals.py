@@ -194,6 +194,38 @@ async def only_free_slots_reached_model(session, out: Outcome) -> None:
     assert await lead_count(session) == 1
 
 
+BOOK_KIM_AT_10 = {
+    "slot_date": SLOT_DAY.isoformat(),
+    "start_time": "10:00",
+    "name": "Kim Fake",
+    "email": "kim.fake@example.test",
+}
+
+
+async def add_free_slot_at_10(session) -> None:
+    start = datetime(SLOT_DAY.year, SLOT_DAY.month, SLOT_DAY.day, 10, tzinfo=get_settings().business_tz)
+    session.add(Slot(start_at=start, end_at=start + timedelta(hours=1)))
+    await session.flush()
+
+
+async def slot_at_10_holder(session) -> int | None:
+    start = datetime(SLOT_DAY.year, SLOT_DAY.month, SLOT_DAY.day, 10, tzinfo=get_settings().business_tz)
+    return await session.scalar(select(Slot.booked_by_lead_id).where(Slot.start_at == start))
+
+
+async def booked_for_kim_and_linked(session, out: Outcome) -> None:
+    lead = await session.scalar(select(Lead).where(Lead.email == "kim.fake@example.test"))
+    assert lead is not None
+    assert await slot_at_10_holder(session) == lead.id
+    conversation = await session.get(Conversation, out.conversation_ids[-1])
+    assert conversation.lead_id == lead.id
+
+
+async def booked_then_freed(session, out: Outcome) -> None:
+    assert await slot_at_10_holder(session) is None
+    assert out.tool_result_sent(7)["confirmed"] == "cancel_booking"
+
+
 KIM = {"name": "Kim Fake", "email": "kim.fake@example.test"}
 
 CASES = [
@@ -314,10 +346,10 @@ CASES = [
         script=[
             call("create_lead", KIM),
             say("Shall I save these details?"),
-            call("cancel_pending_action"),
+            call("decline_pending_action"),
             say("No problem, nothing was saved."),
         ],
-        expected_tools=[("create_lead", OK), ("cancel_pending_action", OK)],
+        expected_tools=[("create_lead", OK), ("decline_pending_action", OK)],
         expected_reply="No problem, nothing was saved.",
         check=declined_and_nothing_saved,
     ),
@@ -343,6 +375,48 @@ CASES = [
         ],
         expected_reply="Saved, Kim.",
         check=corrected_email_saved,
+    ),
+    EvalCase(
+        name="booking_confirmed",
+        turns=[f"Book me in at 10:00 on {SLOT_DAY.isoformat()}. Kim Fake, kim.fake@example.test", "yes"],
+        script=[
+            call("book_slot", BOOK_KIM_AT_10),
+            say("Shall I book 10:00 for Kim Fake?"),
+            call("confirm_pending_action"),
+            say("Booked! See you at 10:00."),
+        ],
+        expected_tools=[("book_slot", OK), ("confirm_pending_action", OK)],
+        expected_reply="Booked! See you at 10:00.",
+        setup=add_free_slot_at_10,
+        check=booked_for_kim_and_linked,
+    ),
+    EvalCase(
+        name="book_then_cancel",
+        turns=[
+            f"Book me in at 10:00 on {SLOT_DAY.isoformat()}. Kim Fake, kim.fake@example.test",
+            "yes",
+            "Sorry, please cancel that booking",
+            "yes, cancel it",
+        ],
+        script=[
+            call("book_slot", BOOK_KIM_AT_10),
+            say("Shall I book 10:00 for Kim Fake?"),
+            call("confirm_pending_action"),
+            say("Booked!"),
+            call("cancel_booking", {"slot_date": SLOT_DAY.isoformat(), "start_time": "10:00"}),
+            say("Cancel your 10:00 booking?"),
+            call("confirm_pending_action"),
+            say("Cancelled."),
+        ],
+        expected_tools=[
+            ("book_slot", OK),
+            ("confirm_pending_action", OK),
+            ("cancel_booking", OK),
+            ("confirm_pending_action", OK),
+        ],
+        expected_reply="Cancelled.",
+        setup=add_free_slot_at_10,
+        check=booked_then_freed,
     ),
 ]
 
