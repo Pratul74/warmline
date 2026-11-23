@@ -2,8 +2,8 @@
 
 A sales and support chat agent for small businesses. A customer sends a
 message; the agent answers questions from the business's FAQ, lists free
-appointment slots, saves interested customers as leads, and records every tool it runs in an audit
-log.
+appointment slots, saves interested customers as leads after they confirm, and
+records every tool it runs in an audit log.
 
 It uses Google Gemini with native function calling. The agent loop is
 hand-written (no LangChain or other agent framework) and short enough to
@@ -25,7 +25,8 @@ POST /chat {message, conversation_id?}
        │                     → Pydantic validation of the arguments
        │                     → run the tool          app/agent/tools.py
        │                         search_faq  (embedding + pgvector search)
-       │                         create_lead (insert or reuse by email)
+       │                         create_lead (proposes a save; nothing is written)
+       │                         confirm_pending_action / cancel_pending_action
        │                         check_availability (free slots for given days)
        │                     → send the result back to the model
        └─ save messages + one tool_calls audit row per tool call,
@@ -50,6 +51,7 @@ POST /chat {message, conversation_id?}
 - **One module talks to the LLM.** The rest of the app uses small dataclasses (`Message`, `ToolSpec`, `ChatResult`), so the SDK can change in one place and tests can pass in a fake.
 - **Tool inputs are Pydantic models.** The same model generates the JSON schema sent to Gemini and validates what Gemini sends back. Invalid arguments go back to the model as an error. After the first mistake the model gets `AGENT_MAX_TOOL_RETRIES` (2) more tries per tool, then the agent stops with a fixed reply.
 - **Semantic FAQ search.** `gemini-embedding-2` (configured by env) turns questions and FAQ entries into 1536-dimension vectors, and pgvector finds the closest ones. Matches below a cosine similarity of 0.70 are dropped, so the model gets "no matches" instead of a wrong answer.
+- **Confirmation before writes, enforced in code.** A write tool (`create_lead`) only stores a pending action and returns the details for the customer to check. The real write runs when the model calls `confirm_pending_action` in a **later** request, after the customer replied. The code refuses a confirmation of an action proposed in the same request, so the model cannot propose and confirm on its own. The claim is a single `UPDATE ... WHERE status = 'pending' AND not expired`, so a second "yes" cannot save twice. Pending actions expire after 10 minutes; a newer proposal replaces an older one.
 - **Audit log in the same transaction.** Each tool call is stored with its arguments, status (`ok`, `validation_error`, `rejected`, `error`), result or error, and duration. It is saved together with the messages, so the log never disagrees with the data.
 - **Tests never call the API.** The model and the embedder are passed in as functions, and tests pass scripted fakes.
 
@@ -102,8 +104,8 @@ docker compose exec db psql -U warmline -d warmline -c "CREATE DATABASE warmline
 uv run pytest -q
 ```
 
-- **93 tests** run against a real Postgres database, with a fake model and a fake embedder. They cover the LLM wrapper (with a fake SDK client), the agent loop, all three tools, the audit log, the error responses and the `/chat` API.
-- **9 evals** (`tests/test_evals.py`) are customer-level scenarios run through the real chat service: FAQ hit, FAQ miss, lead captured, lead over two messages, bad arguments then fixed, retry give-up, unknown tool rejected, embedding outage, and availability lookup. Each checks the audit-log rows, the reply and the database.
+- **105 tests** run against a real Postgres database, with a fake model and a fake embedder. They cover the LLM wrapper (with a fake SDK client), the agent loop, all five tools, the confirmation flow, the audit log, the error responses and the `/chat` API.
+- **12 evals** (`tests/test_evals.py`) are customer-level scenarios run through the real chat service: FAQ hit, FAQ miss, lead captured (with confirmation), lead over several messages, bad arguments then fixed, retry give-up, unknown tool rejected, embedding outage, availability lookup, confirmation in the same turn refused, customer declines, and details corrected before confirming. Each checks the audit-log rows, the reply and the database.
 - **What the evals do not prove:** the model in them is scripted, so they test how this code handles each model behaviour, not whether Gemini chooses tools well. They don't test the system prompt or the 0.70 similarity threshold. There is no live evaluation against the real model.
 - **CI:** `.github/workflows/tests.yml` runs `uv run pytest -q` on every push and on pull requests to `main`, with a pgvector Postgres service container and placeholder settings (the Gemini key is a dummy, because no test calls the API).
 
@@ -129,7 +131,7 @@ All settings come from environment variables (or `.env`). See `.env.example`.
 
 ## Not built yet
 
-- **Present but not connected:** booking and cancelling in `app/services/booking.py` (only availability is used), `app/services/pending_actions.py` (confirmation before writes) and `app/services/request_logs.py` (empty), plus their tables (`slots`, `pending_actions`, `request_logs`). They are not used by the agent, have known bugs, and are planned for the next phase.
+- **Present but not connected:** booking and cancelling in `app/services/booking.py` (only availability is used) and `app/services/request_logs.py` (empty), plus the `request_logs` table. They are not used by the agent, booking has known bugs, and both are planned for the next phase.
 - No authentication or per-business accounts, no frontend, no deployment, no cost or latency logging, and no live evaluation set.
 
 ## Known limitations
@@ -155,8 +157,14 @@ All settings come from environment variables (or `.env`). See `.env.example`.
   model calls at once can exhaust the connection pool.
 - Only user and assistant text is stored as conversation history. Tool
   calls are not replayed on later turns.
-- `create_lead` saves a lead without asking the customer to confirm it,
-  checks only the email's shape, and treats the same email as the same lead.
+- `create_lead` checks only the email's shape and treats the same email as
+  the same lead.
+- Confirmation: the model decides whether the customer's reply means "yes".
+  The code guarantees a later request, the same conversation, not expired and
+  used once, but not that the customer really agreed to exactly what was
+  read back. Expired or abandoned actions keep `status = pending` (there is no
+  cleanup job); `expires_at` is what makes them unusable. Saving a lead now
+  takes one extra customer message.
 - `search_faq` uses a similarity threshold (0.70) chosen from a small live
   test with fake FAQ data. The gap between right and wrong matches was
   narrow (0.71 vs 0.68), so it needs checking against real FAQs. Each FAQ
