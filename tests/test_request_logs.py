@@ -173,3 +173,27 @@ async def test_failure_logging_that_fails_still_returns_the_model_error(session,
     assert response.status_code == 503
     assert response.json()["detail"] == "Model request failed with status 500"
     assert await all_logs(session) == []
+
+
+async def test_model_failure_after_a_tool_keeps_the_audit_rows_and_tokens(session, post):
+    conversations_before = await session.scalar(select(func.count()).select_from(Conversation))
+    fake = ScriptedChat(
+        [
+            tool_call("check_availability", {"start_date": "2030-01-07"}, tokens_in=20, tokens_out=3),
+            LLMError("Model request failed with status 500"),
+        ]
+    )
+
+    response = await post(fake, {"message": "Anything free on 7 January 2030?"})
+
+    assert response.status_code == 503
+    [log] = await all_logs(session)
+    assert log.status is RequestStatus.MODEL_ERROR
+    assert (log.steps, log.input_tokens, log.output_tokens) == (1, 20, 3)
+    [audit] = list(await session.scalars(select(ToolCallRow)))
+    assert (audit.tool_name, audit.request_id, audit.conversation_id) == (
+        "check_availability",
+        log.request_id,
+        None,
+    )
+    assert await session.scalar(select(func.count()).select_from(Conversation)) == conversations_before
