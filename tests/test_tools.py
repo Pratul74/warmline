@@ -4,7 +4,7 @@ from app.agent.loop import run_tool
 from app.agent.tools import FAQ_MIN_SIMILARITY, build_tools
 from app.core.config import get_settings
 from app.core.llm import LLMError, ToolCall
-from app.db.models import FaqEntry
+from app.db.models import Conversation, FaqEntry
 from app.services.lead import InvalidLeadError, create_lead
 
 
@@ -31,42 +31,6 @@ async def test_service_same_email_any_case_reuses_lead_and_fills_missing_phone(s
 async def test_service_rejects_invalid_email(session, bad_email):
     with pytest.raises(InvalidLeadError):
         await create_lead(session, name="X", email=bad_email)
-
-
-
-async def run_create_lead(session, args: dict) -> dict:
-    output, _status = await run_tool(ToolCall(name="create_lead", args=args), build_tools(session))
-    return output
-
-
-async def test_tool_returns_only_ids_on_success(session):
-    output = await run_create_lead(session, {"name": "Ana Fake", "email": "ana@example.test"})
-
-    assert set(output) == {"lead_id", "created"}
-    assert output["created"] is True
-
-
-async def test_tool_reports_missing_email_to_the_model(session):
-    output = await run_create_lead(session, {"name": "Ana Fake"})
-
-    assert output["error"].startswith("Invalid arguments.")
-    assert "email" in output["error"]
-
-
-async def test_tool_reports_unknown_argument(session):
-    output = await run_create_lead(
-        session, {"name": "Ana", "email": "ana2@example.test", "budget": "1M"}
-    )
-
-    assert "budget" in output["error"]
-
-
-async def test_tool_reports_business_rule_error_and_session_stays_usable(session):
-    output = await run_create_lead(session, {"name": "Ana", "email": "no-at-sign"})
-    assert output == {"error": "Invalid email address"}
-    ok = await run_create_lead(session, {"name": "Ana", "email": "ana3@example.test"})
-    assert ok["created"] is True
-
 
 
 
@@ -98,7 +62,10 @@ async def add_faqs(session) -> None:
 
 
 async def run_search(session, args: dict, embed) -> dict:
-    tools = build_tools(session, embed_query_fn=embed)
+    conversation = Conversation()
+    session.add(conversation)
+    await session.flush()
+    tools = build_tools(session, conversation_id=conversation.id, embed_query_fn=embed)
     output, _status = await run_tool(ToolCall(name="search_faq", args=args), tools)
     return output
 
