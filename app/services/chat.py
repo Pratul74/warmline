@@ -11,9 +11,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.agent.loop import AgentResult, ChatFn, ToolRun, run_agent
 from app.agent.prompts import build_system_prompt
-from app.agent.tools import EmbedQueryFn, build_tools
+from app.agent.tools import EmbedQueryFn, build_tools, describe_completed_action
 from app.core.config import get_settings
-from app.core.llm import LLMError, LLMRateLimitError, Message, chat, embed_query
+from app.core.llm import LLMRateLimitError, Message, chat, embed_query
 from app.db.models import Conversation, MessageRole, RequestStatus, ToolCallStatus
 from app.db.models import Message as DbMessage
 from app.db.session import DB_ERRORS
@@ -57,6 +57,18 @@ async def _load_history(session: AsyncSession, conversation_id: int) -> list[Mes
     return [Message(role=row.role.value, text=row.content) for row in reversed(newest_first)]
 
 
+def _final_reply(result: AgentResult) -> str:
+    if not (result.hit_step_limit or result.gave_up_on_tool):
+        return result.reply
+    done = [
+        describe_completed_action(run.result)
+        for run in result.tool_runs
+        if run.name == "confirm_pending_action" and run.ok
+    ]
+    done = [sentence for sentence in done if sentence]
+    return " ".join([*done, result.reply]) if done else result.reply
+
+
 def _saved_lead_id(result: AgentResult) -> int | None:
     for run in reversed(result.tool_runs):
         if run.name == "confirm_pending_action" and run.ok and "lead_id" in run.result:
@@ -65,7 +77,7 @@ def _saved_lead_id(result: AgentResult) -> int | None:
 
 
 async def _log_tool_runs(
-    session: AsyncSession, *, conversation_id: int, request_id: UUID, runs: list[ToolRun]
+    session: AsyncSession, *, conversation_id: int | None, request_id: UUID, runs: list[ToolRun]
 ) -> None:
     for run in runs:
         await log_tool_call(
@@ -112,24 +124,31 @@ def _elapsed_ms(started: float) -> int:
     return round((time.perf_counter() - started) * 1000)
 
 
-async def _log_failed_request(
+async def _record_failed_request(
     session: AsyncSession,
     *,
     request_id: UUID,
     conversation_id: int | None,
-    error: LLMError,
+    result: AgentResult,
     started: float,
 ) -> None:
+    error = result.error
     status = (
         RequestStatus.RATE_LIMITED if isinstance(error, LLMRateLimitError) else RequestStatus.MODEL_ERROR
     )
     try:
+        await _log_tool_runs(
+            session, conversation_id=conversation_id, request_id=request_id, runs=result.tool_runs
+        )
         await log_request(
             session,
             request_id=request_id,
             conversation_id=conversation_id,
             status=status,
             latency_ms=_elapsed_ms(started),
+            steps=result.steps,
+            input_tokens=result.input_tokens,
+            output_tokens=result.output_tokens,
         )
         await session.commit()
     except DB_ERRORS:
@@ -168,24 +187,24 @@ async def _handle_chat(
         await session.flush()
 
     history.append(Message(role="user", text=message))
-    try:
-        result = await run_agent(
-            history,
-            build_tools(session, conversation_id=conversation.id, embed_query_fn=embed_query_fn),
-            system=build_system_prompt(now),
-            chat_fn=chat_fn,
-        )
-    except LLMError as exc:
+    result = await run_agent(
+        history,
+        build_tools(session, conversation_id=conversation.id, embed_query_fn=embed_query_fn),
+        system=build_system_prompt(now),
+        chat_fn=chat_fn,
+    )
+    if result.error is not None:
         await _safe_rollback(session)
-        await _log_failed_request(
+        await _record_failed_request(
             session,
             request_id=request_id,
             conversation_id=conversation_id,
-            error=exc,
+            result=result,
             started=started,
         )
-        raise
+        raise result.error
 
+    reply = _final_reply(result)
     lead_id = _saved_lead_id(result)
     if lead_id is not None:
         conversation.lead_id = lead_id
@@ -196,7 +215,7 @@ async def _handle_chat(
         [
             DbMessage(conversation_id=conversation.id, role=MessageRole.USER, content=message),
             DbMessage(
-                conversation_id=conversation.id, role=MessageRole.ASSISTANT, content=result.reply
+                conversation_id=conversation.id, role=MessageRole.ASSISTANT, content=reply
             ),
         ]
     )
@@ -220,4 +239,4 @@ async def _handle_chat(
         result.input_tokens,
         result.output_tokens,
     )
-    return ChatTurn(conversation_id=conversation.id, reply=result.reply)
+    return ChatTurn(conversation_id=conversation.id, reply=reply)
