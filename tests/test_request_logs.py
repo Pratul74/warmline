@@ -15,6 +15,7 @@ from app.db.session import get_session
 from app.main import app
 from app.services import chat as chat_service
 from app.services.request_logs import compute_cost
+from tests.factories import auth_headers, new_account
 
 
 class ScriptedChat:
@@ -49,6 +50,8 @@ def prices(monkeypatch):
 
 @pytest_asyncio.fixture
 async def post(session):
+    headers = auth_headers(await new_account(session))
+
     async def override_session():
         yield session
 
@@ -59,7 +62,9 @@ async def post(session):
         app.dependency_overrides[get_session] = override_session
         app.dependency_overrides[get_chat_fn] = lambda: fake
         app.dependency_overrides[get_embed_query_fn] = lambda: no_embeddings
-        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        async with AsyncClient(
+            transport=ASGITransport(app=app), base_url="http://test", headers=headers
+        ) as client:
             return await client.post("/chat", json=body)
 
     yield send
@@ -93,10 +98,6 @@ def test_cost_is_zero_on_free_tier_prices(prices):
 
     assert compute_cost(123_456, 7_890) == Decimal("0")
 
-
-# ---- one row per /chat request ---------------------------------------------------
-
-
 async def test_successful_request_logs_tokens_steps_cost_and_audit_request_id(session, post, prices):
     prices(0.10, 0.40)
     fake = ScriptedChat(
@@ -128,10 +129,6 @@ async def test_each_request_gets_its_own_row(session, post):
     logs = await all_logs(session)
     assert [log.conversation_id for log in logs] == [conv_id, conv_id]
     assert len({log.request_id for log in logs}) == 2
-
-
-# ---- failures are logged too -----------------------------------------------------
-
 
 async def test_rate_limit_on_a_new_conversation_is_logged_without_a_conversation(session, post):
     conversations_before = await session.scalar(select(func.count()).select_from(Conversation))
