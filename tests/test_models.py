@@ -9,6 +9,7 @@ from app.db.models import (
     Message,
     MessageRole,
 )
+from tests.factories import new_conversation
 
 
 async def test_expected_indexes_exist():
@@ -45,9 +46,7 @@ async def test_lead_email_unique_case_insensitive(session):
 
 
 async def test_messages_in_one_transaction_load_in_insert_order(session):
-    conv = Conversation()
-    session.add(conv)
-    await session.flush()
+    conv = await new_conversation(session)
 
     session.add_all(
         [
