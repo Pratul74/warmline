@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import time
 from dataclasses import dataclass
 from datetime import datetime
 from uuid import UUID, uuid4
@@ -12,10 +13,11 @@ from app.agent.loop import AgentResult, ChatFn, ToolRun, run_agent
 from app.agent.prompts import build_system_prompt
 from app.agent.tools import EmbedQueryFn, build_tools
 from app.core.config import get_settings
-from app.core.llm import LLMError, Message, chat, embed_query
-from app.db.models import Conversation, MessageRole, ToolCallStatus
+from app.core.llm import LLMError, LLMRateLimitError, Message, chat, embed_query
+from app.db.models import Conversation, MessageRole, RequestStatus, ToolCallStatus
 from app.db.models import Message as DbMessage
 from app.db.session import DB_ERRORS
+from app.services.request_logs import log_request
 from app.services.tool_calls import log_tool_call
 
 logger = logging.getLogger(__name__)
@@ -97,11 +99,42 @@ async def handle_chat(
             chat_fn=chat_fn,
             embed_query_fn=embed_query_fn,
             now=now or datetime.now(get_settings().business_tz),
+            request_id=uuid4(),
+            started=time.perf_counter(),
         )
     except DB_ERRORS as exc:
         logger.exception("Database error while handling a chat turn")
         await _safe_rollback(session)
         raise ChatStorageError("Could not load or save the conversation") from exc
+
+
+def _elapsed_ms(started: float) -> int:
+    return round((time.perf_counter() - started) * 1000)
+
+
+async def _log_failed_request(
+    session: AsyncSession,
+    *,
+    request_id: UUID,
+    conversation_id: int | None,
+    error: LLMError,
+    started: float,
+) -> None:
+    status = (
+        RequestStatus.RATE_LIMITED if isinstance(error, LLMRateLimitError) else RequestStatus.MODEL_ERROR
+    )
+    try:
+        await log_request(
+            session,
+            request_id=request_id,
+            conversation_id=conversation_id,
+            status=status,
+            latency_ms=_elapsed_ms(started),
+        )
+        await session.commit()
+    except DB_ERRORS:
+        logger.exception("Could not record failed request %s", request_id)
+        await _safe_rollback(session)
 
 
 async def _safe_rollback(session: AsyncSession) -> None:
@@ -119,6 +152,8 @@ async def _handle_chat(
     chat_fn: ChatFn,
     embed_query_fn: EmbedQueryFn,
     now: datetime,
+    request_id: UUID,
+    started: float,
 ) -> ChatTurn:
     conversation: Conversation | None = None
     history: list[Message] = []
@@ -140,15 +175,22 @@ async def _handle_chat(
             system=build_system_prompt(now),
             chat_fn=chat_fn,
         )
-    except LLMError:
+    except LLMError as exc:
         await _safe_rollback(session)
+        await _log_failed_request(
+            session,
+            request_id=request_id,
+            conversation_id=conversation_id,
+            error=exc,
+            started=started,
+        )
         raise
 
     lead_id = _saved_lead_id(result)
     if lead_id is not None:
         conversation.lead_id = lead_id
     await _log_tool_runs(
-        session, conversation_id=conversation.id, request_id=uuid4(), runs=result.tool_runs
+        session, conversation_id=conversation.id, request_id=request_id, runs=result.tool_runs
     )
     session.add_all(
         [
@@ -158,5 +200,24 @@ async def _handle_chat(
             ),
         ]
     )
+    latency_ms = _elapsed_ms(started)
+    await log_request(
+        session,
+        request_id=request_id,
+        conversation_id=conversation.id,
+        status=RequestStatus.OK,
+        latency_ms=latency_ms,
+        steps=result.steps,
+        input_tokens=result.input_tokens,
+        output_tokens=result.output_tokens,
+    )
     await session.commit()
+    logger.info(
+        "chat request %s: %d ms, %d steps, %d in / %d out tokens",
+        request_id,
+        latency_ms,
+        result.steps,
+        result.input_tokens,
+        result.output_tokens,
+    )
     return ChatTurn(conversation_id=conversation.id, reply=result.reply)
