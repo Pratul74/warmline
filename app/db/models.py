@@ -8,9 +8,7 @@ from sqlalchemy import DateTime, ForeignKey,Integer, Numeric, String, Text, func
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
-from app.core.config import get_settings
-
-settings = get_settings()
+from app.core.config import EMBEDDING_DIM
 
 class Base(DeclarativeBase):
     pass
@@ -151,9 +149,9 @@ class ToolCall(Base):
 
     id: Mapped[int] = mapped_column(primary_key=True)
 
-    conversation_id: Mapped[int] = mapped_column(
+    conversation_id: Mapped[int | None] = mapped_column(
         ForeignKey("conversations.id", ondelete="CASCADE"),
-        nullable=False,
+        nullable=True,
     )
 
     request_id: Mapped[UUID] = mapped_column(Uuid, nullable=False)
@@ -236,7 +234,7 @@ class FaqEntry(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     question: Mapped[str] = mapped_column(Text)
     answer: Mapped[str] = mapped_column(Text)
-    embedding: Mapped[list[float]] = mapped_column(Vector(settings.embedding_dim))
+    embedding: Mapped[list[float]] = mapped_column(Vector(EMBEDDING_DIM))
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )
@@ -275,7 +273,6 @@ class RequestLog(Base):
         unique=True,
     )
 
-    # NULL when the request failed on a new conversation (that row was rolled back).
     conversation_id: Mapped[int | None] = mapped_column(
         ForeignKey("conversations.id", ondelete="CASCADE"),
         nullable=True,
