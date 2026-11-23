@@ -21,6 +21,7 @@ from app.services.booking import (
     cancel_booking,
 )
 from app.services.lead import create_lead
+from tests.factories import new_conversation
 
 HOUR = timedelta(hours=1)
 KIM = {"name": "Kim Fake", "email": "Kim@Example.TEST"}
@@ -133,9 +134,7 @@ async def test_two_connections_cannot_book_the_same_slot(engine):
 
 @pytest.fixture
 async def conversation(session) -> Conversation:
-    conversation = Conversation()
-    session.add(conversation)
-    await session.flush()
+    conversation = await new_conversation(session)
     return conversation
 
 
