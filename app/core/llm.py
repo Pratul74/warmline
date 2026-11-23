@@ -10,7 +10,7 @@ from typing import Any, Literal, TypeVar
 from google import genai
 from google.genai import errors, types
 
-from app.core.config import get_settings
+from app.core.config import EMBEDDING_DIM, get_settings
 
 logger = logging.getLogger(__name__)
 
@@ -200,7 +200,7 @@ def _document_text(title: str, text: str) -> str:
 async def _embed(contents: list[str], client: Any) -> list[list[float]]:
     settings = get_settings()
     client = client or _default_client()
-    config = types.EmbedContentConfig(output_dimensionality=settings.embedding_dim)
+    config = types.EmbedContentConfig(output_dimensionality=EMBEDDING_DIM)
     batch = [types.Content(parts=[types.Part(text=text)]) for text in contents]
 
     response = await _call_with_retry(
@@ -211,8 +211,8 @@ async def _embed(contents: list[str], client: Any) -> list[list[float]]:
     vectors = [list(e.values or []) for e in response.embeddings or []]
     if len(vectors) != len(contents):
         raise LLMError(f"Expected {len(contents)} embeddings, got {len(vectors)}")
-    if any(len(v) != settings.embedding_dim for v in vectors):
-        raise LLMError(f"Embedding size is not the expected {settings.embedding_dim}")
+    if any(len(v) != EMBEDDING_DIM for v in vectors):
+        raise LLMError(f"Embedding size is not the expected {EMBEDDING_DIM}")
     return vectors
 
 
