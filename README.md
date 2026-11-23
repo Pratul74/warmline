@@ -131,10 +131,15 @@ All settings come from environment variables (or `.env`). See `.env.example`.
 
 ## Known limitations
 
-- `app/core/llm.py` turns timeouts and HTTP errors from Gemini into a clear
-  `LLMError`, but other network failures (DNS failure, connection refused)
-  are not caught yet. Timeouts are not retried, and the 429 retry waits are
-  fixed (no jitter).
+- `POST /chat` returns 429 when Gemini's rate limit persists after retries,
+  503 for other model failures, and 503 with a generic message for database
+  failures (details go to the server log only). The 429 has no `Retry-After`
+  header. Timeouts and network errors are not retried, and the 429/503
+  retry waits are fixed (no jitter).
+- If the database fails while a tool is running, the tool reports an
+  internal error to the model and the model makes one more call before the
+  request fails with 503 when saving. That extra model call is wasted. This
+  path follows from the code but has no end-to-end test.
 - `POST /chat` uses sequential conversation ids with no ownership check, so
   anyone who guesses an id can continue that conversation. This is
   acceptable only for local demos with fake data.
@@ -142,7 +147,6 @@ All settings come from environment variables (or `.env`). See `.env.example`.
   model calls at once can exhaust the connection pool.
 - Only user and assistant text is stored as conversation history. Tool
   calls are not replayed on later turns.
-- `GET /health` includes the raw database error text in its 503 response.
 - `create_lead` saves a lead without asking the customer to confirm it,
   checks only the email's shape, and treats the same email as the same lead.
 - `search_faq` uses a similarity threshold (0.70) chosen from a small live
