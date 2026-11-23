@@ -2,15 +2,13 @@ from uuid import uuid4
 
 import pytest
 
-from app.db.models import Conversation, ToolCallStatus
+from app.db.models import ToolCallStatus
 from app.services.tool_calls import InvalidToolCallError, get_tool_history, log_tool_call
+from tests import factories
 
 
 async def new_conversation(session) -> int:
-    conversation = Conversation()
-    session.add(conversation)
-    await session.flush()
-    return conversation.id
+    return (await factories.new_conversation(session)).id
 
 
 async def log(session, conversation_id, request_id, step, name, status=ToolCallStatus.OK, **kw):
