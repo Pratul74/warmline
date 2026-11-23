@@ -6,6 +6,7 @@ from typing import Literal
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 EMBEDDING_DIM = 1536
+MIN_SECRET_KEY_LENGTH = 32
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
@@ -32,8 +33,18 @@ class Settings(BaseSettings):
     llm_output_price_per_1m_tokens: float = Field(default=0.0, ge=0)
 
     secret_key: SecretStr
-    algorithm: str = "HS256"
-    access_token_expire_minutes: int = 30
+    algorithm: Literal["HS256", "HS384", "HS512"] = "HS256"
+    access_token_expire_minutes: int = Field(default=30, ge=1, le=1440)
+
+    @field_validator("secret_key")
+    @classmethod
+    def _long_secret_key(cls, value: SecretStr) -> SecretStr:
+        if len(value.get_secret_value()) < MIN_SECRET_KEY_LENGTH:
+            raise ValueError(
+                f"SECRET_KEY must be at least {MIN_SECRET_KEY_LENGTH} characters; "
+                "generate one with: python -c \"import secrets; print(secrets.token_urlsafe(48))\""
+            )
+        return value
 
     @field_validator("business_timezone")
     @classmethod
