@@ -192,7 +192,12 @@ async def _handle_chat(
     history.append(Message(role="user", text=message))
     result = await run_agent(
         history,
-        build_tools(session, conversation_id=conversation.id, embed_query_fn=embed_query_fn),
+        build_tools(
+            session,
+            account_id=conversation.account_id,
+            conversation_id=conversation.id,
+            embed_query_fn=embed_query_fn,
+        ),
         system=build_system_prompt(now),
         chat_fn=chat_fn,
     )
