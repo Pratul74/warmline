@@ -101,6 +101,8 @@ class Integration(Base):
 
     account: Mapped["Account"] = relationship(back_populates="integrations")
 
+    conversations: Mapped[list["Conversation"]] = relationship(back_populates="integration")
+
 
 class Lead(Base):
     __tablename__ = "leads"
@@ -136,6 +138,7 @@ class Conversation(Base):
     __table_args__ = (
         Index("ix_conversations_lead_id", "lead_id"),
         Index("ix_conversations_account_id", "account_id"),
+        Index("ix_conversations_integration_id", "integration_id"),
     )
 
     id: Mapped[int] = mapped_column(primary_key=True)
@@ -150,6 +153,13 @@ class Conversation(Base):
         nullable=True,
     )
 
+    integration_id: Mapped[int | None] = mapped_column(
+        ForeignKey("integrations.id", ondelete="RESTRICT"),
+        nullable=True,
+    )
+
+    public_token_hash: Mapped[str | None] = mapped_column(String(64), nullable=True, unique=True)
+
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         server_default=func.now(),
@@ -157,6 +167,8 @@ class Conversation(Base):
     )
 
     account: Mapped["Account"] = relationship(back_populates="conversations")
+
+    integration: Mapped["Integration | None"] = relationship(back_populates="conversations")
 
     lead: Mapped["Lead | None"] = relationship(
         back_populates="conversations"
