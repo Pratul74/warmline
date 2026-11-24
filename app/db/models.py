@@ -4,7 +4,7 @@ from enum import StrEnum
 from uuid import UUID
 
 from pgvector.sqlalchemy import Vector
-from sqlalchemy import DateTime, ForeignKey,Integer, Numeric, String, Text, func, Enum as SQLEnum, Uuid, Index, text
+from sqlalchemy import DateTime, ForeignKey,Integer, Numeric, String, Text, func, Enum as SQLEnum, Uuid, Index, UniqueConstraint, text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
@@ -69,10 +69,14 @@ class Account(Base):
 class Lead(Base):
     __tablename__ = "leads"
     __table_args__ = (
-        Index("uq_leads_email_lower", text("lower(email)"), unique=True),
+        Index("uq_leads_account_email_lower", "account_id", text("lower(email)"), unique=True),
     )
 
     id: Mapped[int] = mapped_column(primary_key=True)
+    account_id: Mapped[int] = mapped_column(
+        ForeignKey("accounts.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
     name: Mapped[str] = mapped_column(String(200))
     email: Mapped[str] = mapped_column(String(320))
     phone: Mapped[str | None] = mapped_column(String(32), default=None)
@@ -257,9 +261,14 @@ class FaqEntry(Base):
         postgresql_with={"m": 16, "ef_construction": 64},
         postgresql_ops={"embedding": "vector_cosine_ops"},
         ),
+        Index("ix_faq_entries_account_id", "account_id"),
     )
 
     id: Mapped[int] = mapped_column(primary_key=True)
+    account_id: Mapped[int] = mapped_column(
+        ForeignKey("accounts.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
     question: Mapped[str] = mapped_column(Text)
     answer: Mapped[str] = mapped_column(Text)
     embedding: Mapped[list[float]] = mapped_column(Vector(EMBEDDING_DIM))
@@ -269,13 +278,18 @@ class FaqEntry(Base):
 
 class Slot(Base):
     __tablename__ = "slots"
+    __table_args__ = (
+        UniqueConstraint("account_id", "start_at", name="uq_slots_account_start_at"),
+    )
 
     id: Mapped[int] = mapped_column(primary_key=True)
 
-    start_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True),
-        unique=True,
+    account_id: Mapped[int] = mapped_column(
+        ForeignKey("accounts.id", ondelete="RESTRICT"),
+        nullable=False,
     )
+
+    start_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
 
     end_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True)
