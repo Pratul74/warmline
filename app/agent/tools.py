@@ -239,22 +239,27 @@ def describe_completed_action(tool_result: dict[str, Any]) -> str | None:
 def build_tools(
     session: AsyncSession,
     *,
+    account_id: int,
     conversation_id: int,
     embed_query_fn: EmbedQueryFn = embed_query,
 ) -> dict[str, Tool]:
     proposed_this_request: set[int] = set()
 
     async def save_lead(args: CreateLeadArgs) -> dict[str, Any]:
-        result = await create_lead(session, **args.model_dump())
+        result = await create_lead(session, account_id=account_id, **args.model_dump())
         return {"lead_id": result.lead.id, "created": result.created}
 
     async def save_booking(action: BookingAction) -> dict[str, Any]:
-        lead = (await create_lead(session, **action.lead.model_dump())).lead
-        booking = await book_slot(session, slot_id=action.slot_id, lead_id=lead.id)
+        lead = (await create_lead(session, account_id=account_id, **action.lead.model_dump())).lead
+        booking = await book_slot(
+            session, account_id=account_id, slot_id=action.slot_id, lead_id=lead.id
+        )
         return {"booked": _describe_slot(booking.slot), "lead_id": lead.id}
 
     async def save_cancellation(action: CancelBookingAction) -> dict[str, Any]:
-        result = await cancel_booking(session, slot_id=action.slot_id, lead_id=action.lead_id)
+        result = await cancel_booking(
+            session, account_id=account_id, slot_id=action.slot_id, lead_id=action.lead_id
+        )
         return {"cancelled_booking": _describe_slot(result.slot)}
 
     write_executors: dict[str, tuple[type[BaseModel], WriteFn]] = {
@@ -265,7 +270,7 @@ def build_tools(
 
     async def find_slot(args: SlotTimeArgs) -> Slot | None:
         start = datetime.combine(args.slot_date, args.start_time, tzinfo=get_settings().business_tz)
-        return await find_slot_by_start(session, start)
+        return await find_slot_by_start(session, account_id=account_id, start_at=start)
 
     async def propose(tool_name: str, details: dict[str, Any]) -> dict[str, Any]:
         open_action = await get_latest_pending_action(session, conversation_id)
@@ -371,7 +376,11 @@ def build_tools(
         except LLMError:
             return {"error": "FAQ search is unavailable right now."}
         matches = await search_faq(
-            session, vector, top_k=FAQ_TOP_K, min_similarity=FAQ_MIN_SIMILARITY
+            session,
+            vector,
+            account_id=account_id,
+            top_k=FAQ_TOP_K,
+            min_similarity=FAQ_MIN_SIMILARITY,
         )
         return {
             "matches": [
@@ -384,7 +393,11 @@ def build_tools(
         window_start, window_end = _local_day_window(args.start_date, args.days)
         try:
             slots = await check_availability(
-                session, window_start=window_start, window_end=window_end, limit=MAX_SLOTS_RETURNED
+                session,
+                account_id=account_id,
+                window_start=window_start,
+                window_end=window_end,
+                limit=MAX_SLOTS_RETURNED,
             )
         except InvalidBookingRequestError as exc:
             return {"error": str(exc)}
