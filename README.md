@@ -74,17 +74,20 @@ cp .env.example .env                 # then set GEMINI_API_KEY and change the pa
 docker compose up -d db              # Postgres 16 + pgvector on 127.0.0.1:5433
 uv sync                              # install dependencies from uv.lock
 uv run alembic upgrade head          # create the tables
-uv run python -m scripts.seed_faq    # 8 fake FAQ entries (one embedding API call)
-uv run python -m scripts.seed_slots  # fake slots, Mon-Sat 10:00/13:00/16:00, next 14 days
 uv run uvicorn app.main:app --reload
 ```
 
-Try it (`/chat` needs an owner token, so register and log in first):
+Try it (`/chat` needs an owner token, so register and log in first). FAQ
+entries and slots belong to one account, so seed them for the account you
+registered, using the `id` from the register response:
 
 ```bash
 curl localhost:8000/health
 curl -X POST localhost:8000/auth/register -H "Content-Type: application/json" \
      -d '{"email": "owner@example.test", "password": "a long fake password", "business_name": "Fake Bikes"}'
+ACCOUNT_ID=...   # the id from the register response
+uv run python -m scripts.seed_faq --account-id $ACCOUNT_ID    # 8 fake FAQ entries (one embedding API call)
+uv run python -m scripts.seed_slots --account-id $ACCOUNT_ID  # fake slots, Mon-Sat 10:00/13:00/16:00, next 14 days
 curl -X POST localhost:8000/auth/login -H "Content-Type: application/json" \
      -d '{"email": "owner@example.test", "password": "a long fake password"}'
 TOKEN=...   # the access_token from the login response
@@ -105,8 +108,9 @@ This builds the API image and starts it next to Postgres on
 `127.0.0.1:8000`. The container runs `alembic upgrade head` before starting
 the server. The API key reaches the container at run time through
 `env_file: .env`; `.env` is excluded from the image by `.dockerignore`. To
-load the fake FAQ entries and slots, run `uv run python -m scripts.seed_faq` and
-`uv run python -m scripts.seed_slots` from the host (the scripts are not in the image).
+load the fake FAQ entries and slots for an account, run
+`uv run python -m scripts.seed_faq --account-id <id>` and
+`uv run python -m scripts.seed_slots --account-id <id>` from the host (the scripts are not in the image).
 
 ## Tests, evals and CI
 
@@ -118,8 +122,8 @@ docker compose exec db psql -U warmline -d warmline -c "CREATE DATABASE warmline
 uv run pytest -q
 ```
 
-- **171 tests** run against a real Postgres database, with a fake model and a fake embedder. They cover the LLM wrapper (with a fake SDK client), the agent loop, all seven tools, the confirmation flow, booking (including a two-connection double-booking test), request cost and latency logging, the audit log, the error responses, owner registration, login and tokens (including expired, tampered, wrong-key and `alg: none` tokens), and the `/chat` API (owner-only, including the step limit and a crashing tool, end to end).
-- **15 evals** (`tests/test_evals.py`) are customer-level scenarios run through the real chat service: FAQ hit, FAQ miss, lead captured (with confirmation), lead over several messages, bad arguments then fixed, retry give-up, unknown tool rejected, embedding outage, availability lookup, confirmation in the same turn refused, customer declines, details corrected before confirming, booking confirmed, booking proposed again on "yes" then confirmed, and book then cancel. Each checks the audit-log rows, the reply and the database.
+- **186 tests** run against a real Postgres database, with a fake model and a fake embedder. They cover the LLM wrapper (with a fake SDK client), the agent loop, all seven tools, the confirmation flow, booking (including a two-connection double-booking test), request cost and latency logging, the audit log, the error responses, owner registration, login and tokens (including expired, tampered, wrong-key and `alg: none` tokens), isolation between accounts (one account cannot see or change another's leads, FAQ entries or slots), and the `/chat` API (owner-only, including the step limit and a crashing tool, end to end).
+- **16 evals** (`tests/test_evals.py`) are customer-level scenarios run through the real chat service: FAQ hit, FAQ miss, lead captured (with confirmation), lead over several messages, bad arguments then fixed, retry give-up, unknown tool rejected, embedding outage, availability lookup, confirmation in the same turn refused, customer declines, details corrected before confirming, booking confirmed, booking proposed again on "yes" then confirmed, book then cancel, and another business's FAQ and slot staying hidden. Each checks the audit-log rows, the reply and the database.
 - **What the evals do not prove:** the model in them is scripted, so they test how this code handles each model behaviour, not whether Gemini chooses tools well. They don't test the system prompt or the 0.70 similarity threshold. There is no live evaluation against the real model.
 - **CI:** `.github/workflows/tests.yml` runs on every push and on pull requests to `main`, with a pgvector Postgres service container and placeholder settings (the Gemini key is a dummy, because no test calls the API). It first applies every migration to a separate empty database and runs `alembic check`, which fails if a model changed without a migration, then runs `uv run pytest -q`.
 
@@ -148,7 +152,6 @@ All settings come from environment variables (or `.env`). See `.env.example`.
 ## Not built yet
 
 - No integration links for end customers yet (Phase 3, in progress), no frontend, no deployment, no dashboard or endpoint for the request logs, and no live evaluation set.
-- Leads, FAQ entries and slots are not yet owned by an account (next Phase 3 step).
 
 ## Known limitations
 
@@ -168,7 +171,7 @@ All settings come from environment variables (or `.env`). See `.env.example`.
   request fails with 503 when saving. That extra model call is wasted. This
   path follows from the code but has no end-to-end test.
 - `check_availability` returns at most 10 slots, so a long range shows only
-  the earliest ones. Slots are fake seed data with no owner, and there is no
+  the earliest ones. Slots are fake seed data (seeded per account), and there is no
   admin path to edit them. There is no rescheduling tool (cancel, then book).
 - `cancel_booking` only cancels bookings of the lead linked to the current
   conversation.
@@ -188,10 +191,19 @@ All settings come from environment variables (or `.env`). See `.env.example`.
   they do not suit long-running server-to-server API use (that would need
   API keys). Conversations created before accounts existed belong to a
   "Legacy (pre-Phase 3)" account that has no password and cannot log in.
-- Leads, FAQ entries and slots are still shared by all accounts: one
-  owner's customers can get another owner's FAQ answers and free slots, and
-  the same email is one lead across all accounts. The next Phase 3 step
-  gives them an owner.
+- Leads, FAQ entries and slots belong to one account. Every query filters
+  by the account of the conversation's owner; the model never sends an
+  account id, so a customer cannot ask for another business's data. The
+  same email in two accounts is two separate leads. This is enforced in the
+  service queries, not by database row-level security, so a new query that
+  forgets the filter would leak data (the isolation tests cover the
+  existing ones). Rows created before accounts existed belong to the
+  "Legacy (pre-Phase 3)" account. A slot and its booking lead are checked to
+  be in the same account when booking, but the database itself does not
+  enforce that.
+- FAQ search filters by account after the vector index lookup, so with many
+  accounts sharing the index a search can return fewer than 3 matches even
+  when the account has more. That is fine at this size.
 - A database connection is held while waiting for the model, so many slow
   model calls at once can exhaust the connection pool.
 - Only user and assistant text is stored as conversation history. Tool
@@ -207,8 +219,7 @@ All settings come from environment variables (or `.env`). See `.env.example`.
 - `search_faq` uses a similarity threshold (0.70) chosen from a small live
   test with fake FAQ data. The gap between right and wrong matches was
   narrow (0.71 vs 0.68), so it needs checking against real FAQs. Each FAQ
-  question costs one extra embedding API call. FAQ entries are shared by
-  everyone (no per-business owner yet), and editing an answer requires
+  question costs one extra embedding API call. Editing an answer requires
   re-running the embedding for that entry.
 - If the model sends invalid tool arguments three times for the same tool
   in one request, the agent stops with a generic "please check your
