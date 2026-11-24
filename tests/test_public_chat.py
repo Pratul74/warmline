@@ -1,18 +1,20 @@
 import hashlib
 import re
+from datetime import UTC, datetime, timedelta
 
 import pytest
 import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.exc import OperationalError
 
 from app.api.chat import get_chat_fn, get_embed_query_fn
-from app.core.config import EMBEDDING_DIM
+from app.core.config import EMBEDDING_DIM, get_settings
 from app.core.llm import ChatResult, LLMError, LLMRateLimitError, ToolCall
-from app.db.models import Conversation
+from app.db.models import Conversation, RateLimitCounter
 from app.db.session import get_session
 from app.main import app
+from app.services import public_chat
 from app.services.integrations import create_integration, rotate_public_id, update_integration
 from tests.factories import auth_headers, new_account, new_conversation, new_faq
 
@@ -244,12 +246,13 @@ async def test_the_links_owner_decides_which_faq_answers(client, session, shop_a
 
 
 async def test_model_failure_on_the_first_message_saves_nothing(client, session, link_a):
+    link_id, public_id = link_a.id, link_a.public_id  # the rollback expires loaded objects
     client.script(LLMError("Model request failed with status 503"))
 
-    response = await send(client, link_a.public_id, "Hi")
+    response = await send(client, public_id, "Hi")
 
     assert response.status_code == 503
-    assert await public_conversations(session, link_a.id) == []
+    assert await public_conversations(session, link_id) == []
 
 
 async def test_rate_limit_returns_429(client, link_a):
@@ -280,3 +283,86 @@ async def test_owner_api_is_unchanged_and_still_needs_a_login(client, shop_a):
     assert without.status_code == 401
     assert with_login.status_code == 200
 
+
+
+CLOCK = datetime(2026, 11, 25, 10, 0, 30, tzinfo=UTC)
+
+
+@pytest.fixture
+def limit_of_two(monkeypatch):
+    settings = get_settings()
+    monkeypatch.setattr(settings, "public_chat_rate_limit", 2)
+    monkeypatch.setattr(settings, "public_chat_rate_window_seconds", 60)
+    clock = {"now": CLOCK}
+    monkeypatch.setattr(public_chat, "utc_now", lambda: clock["now"])
+    return clock
+
+
+async def test_a_link_over_its_limit_gets_429_without_calling_the_model(client, session, link_a, limit_of_two):
+    model = client.script(say("One"), say("Two"))
+
+    first = await send(client, link_a.public_id, "Hi")
+    second = await send(client, link_a.public_id, "Hi again")
+    third = await send(client, link_a.public_id, "And again")
+
+    assert (first.status_code, second.status_code, third.status_code) == (200, 200, 429)
+    assert third.headers["Retry-After"] == "30"
+    assert third.json() == {"detail": "This chat is receiving too many messages, please try again shortly"}
+    assert len(model.seen) == 2
+    assert len(await public_conversations(session, link_a.id)) == 2
+
+
+async def test_failed_model_calls_and_wrong_tokens_still_count(client, link_a, limit_of_two):
+    public_id = link_a.public_id
+    model = client.script(LLMError("Model request failed with status 503"))
+
+    failed = await send(client, public_id, "Hi")
+    guessed = await send(client, public_id, "Hi", token="x" * 43)
+    refused = await send(client, public_id, "Hi")
+
+    assert (failed.status_code, guessed.status_code, refused.status_code) == (503, 404, 429)
+    assert len(model.seen) == 1
+
+
+async def test_the_next_window_accepts_messages_again(client, link_a, limit_of_two):
+    client.script(say("One"), say("Two"), say("Three"))
+    await send(client, link_a.public_id, "Hi")
+    await send(client, link_a.public_id, "Hi")
+    refused = await send(client, link_a.public_id, "Hi")
+
+    limit_of_two["now"] = CLOCK + timedelta(seconds=30)
+    accepted = await send(client, link_a.public_id, "Hi")
+
+    assert (refused.status_code, accepted.status_code) == (429, 200)
+
+
+async def test_one_links_limit_does_not_block_another_owner(client, session, shop_b, link_a, limit_of_two):
+    link_b = await create_integration(session, account_id=shop_b.id, name="Shop B chat")
+    client.script(say("A1"), say("A2"), say("B1"))
+    await send(client, link_a.public_id, "Hi")
+    await send(client, link_a.public_id, "Hi")
+
+    blocked = await send(client, link_a.public_id, "Hi")
+    other = await send(client, link_b.public_id, "Hi")
+
+    assert (blocked.status_code, other.status_code) == (429, 200)
+
+
+async def test_unknown_and_disabled_links_are_not_counted(client, session, shop_a, link_a, limit_of_two):
+    await update_integration(session, account_id=shop_a.id, integration_id=link_a.id, enabled=False)
+
+    unknown = await send(client, "notARealLinkAtAll123456", "Hi")
+    disabled = await send(client, link_a.public_id, "Hi")
+
+    assert (unknown.status_code, disabled.status_code) == (404, 403)
+    assert await session.scalar(select(func.count()).select_from(RateLimitCounter)) == 0
+
+
+async def test_the_profile_is_not_rate_limited(client, link_a, limit_of_two):
+    client.script(say("One"), say("Two"))
+    for _ in range(3):
+        await send(client, link_a.public_id, "Hi")
+
+    profile = await client.get(f"/public/c/{link_a.public_id}")
+
+    assert profile.status_code == 200
