@@ -9,11 +9,11 @@ from app.agent.tools import describe_completed_action
 from app.api.chat import get_chat_fn, get_embed_query_fn
 from app.core.config import EMBEDDING_DIM, get_settings
 from app.core.llm import ChatResult, LLMError, LLMRateLimitError, ToolCall
-from app.db.models import Conversation, FaqEntry, Lead, Message, RequestLog, ToolCallStatus
+from app.db.models import Conversation, Lead, Message, RequestLog, ToolCallStatus
 from app.db.models import ToolCall as ToolCallRow
 from app.db.session import get_session
 from app.main import app
-from tests.factories import auth_headers, new_account
+from tests.factories import auth_headers, new_account, new_faq, new_slot
 
 
 class ScriptedChat:
@@ -38,8 +38,13 @@ def text(reply: str) -> ChatResult:
 
 
 @pytest_asyncio.fixture
-async def client_with(session):
-    headers = auth_headers(await new_account(session))
+async def account(session):
+    return await new_account(session)
+
+
+@pytest_asyncio.fixture
+async def client_with(session, account):
+    headers = auth_headers(account)
 
     async def override_session():
         yield session
@@ -200,11 +205,12 @@ async def test_model_failure_after_confirming_rolls_back_and_the_action_stays_pe
     assert len(confirms) == 2
 
 
-async def test_search_faq_tool_answer_is_sent_back_to_the_model(client_with, session):
+async def test_search_faq_tool_answer_is_sent_back_to_the_model(client_with, session, account):
     vector = [0.0] * EMBEDDING_DIM
     vector[0] = 1.0
-    session.add(FaqEntry(question="What are your hours?", answer="9am to 6pm.", embedding=vector))
-    await session.flush()
+    await new_faq(
+        session, account.id, question="What are your hours?", answer="9am to 6pm.", embedding=vector
+    )
 
     async def fake_embed(question: str) -> list[float]:
         return vector
@@ -330,15 +336,14 @@ async def test_database_failure_before_the_model_returns_503_without_calling_it(
     assert fake.seen == []
 
 
-async def test_check_availability_runs_through_chat_and_is_audited(client_with, session, monkeypatch):
+async def test_check_availability_runs_through_chat_and_is_audited(
+    client_with, session, account, monkeypatch
+):
     monkeypatch.setattr(get_settings(), "business_timezone", "UTC")
     from datetime import UTC, datetime, timedelta
 
-    from app.db.models import Slot
-
     start = (datetime.now(UTC) + timedelta(days=5)).replace(hour=10, minute=0, second=0, microsecond=0)
-    session.add(Slot(start_at=start, end_at=start + timedelta(hours=1)))
-    await session.flush()
+    await new_slot(session, account.id, start)
     call = ToolCall(name="check_availability", args={"start_date": start.date().isoformat()})
     fake = ScriptedChat(
         [ChatResult(text="", tool_calls=[call], input_tokens=1, output_tokens=1), text("10:00 is free.")]
@@ -421,17 +426,15 @@ def test_completed_actions_are_described_for_the_customer():
     assert describe_completed_action({"error": "nothing pending"}) is None
 
 
-async def test_step_limit_after_a_confirmed_booking_still_tells_the_customer(client_with, session, monkeypatch):
+async def test_step_limit_after_a_confirmed_booking_still_tells_the_customer(
+    client_with, session, account, monkeypatch
+):
     from datetime import UTC, datetime, timedelta
-
-    from app.db.models import Slot
 
     monkeypatch.setattr(get_settings(), "business_timezone", "UTC")
     monkeypatch.setattr(get_settings(), "agent_max_steps", 2)
     start = (datetime.now(UTC) + timedelta(days=5)).replace(hour=10, minute=0, second=0, microsecond=0)
-    slot = Slot(start_at=start, end_at=start + timedelta(hours=1))
-    session.add(slot)
-    await session.flush()
+    slot = await new_slot(session, account.id, start)
     book = ToolCall(
         name="book_slot",
         args={
