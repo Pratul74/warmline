@@ -18,7 +18,7 @@ class InvalidBookingRequestError(BookingError, ValueError):
     """The request itself is malformed (bad window, naive datetime, bad limit)."""
 
 class SlotNotFoundError(BookingError):
-    """No slot exists with the given id."""
+    """No slot with the given id exists in this account."""
 
 class SlotUnavailableError(BookingError):
     """The slot is booked by someone else, or changed while we were booking it."""
@@ -27,7 +27,7 @@ class SlotInPastError(BookingError):
     """The slot has already started, so it can no longer be booked or cancelled."""
 
 class LeadNotFoundError(BookingError):
-    """No lead exists with the given id."""
+    """No lead with the given id exists in this account."""
 
 class BookingNotFoundError(BookingError):
     """This lead holds no booking on this slot."""
@@ -56,10 +56,12 @@ def _validate_limit(limit: int) -> int:
         raise InvalidBookingRequestError("limit must be at least 1")
     return min(limit, MAX_AVAILABILITY_LIMIT)
 
-async def _load_slot_snapshot(session: AsyncSession, slot_id: int) -> _SlotSnapshot | None:
+async def _load_slot_snapshot(
+        session: AsyncSession, *, account_id: int, slot_id: int
+) -> _SlotSnapshot | None:
     stmt = (
         select(Slot, (Slot.start_at <= func.now()).label("is_past"))
-        .where(Slot.id == slot_id)
+        .where(Slot.id == slot_id, Slot.account_id == account_id)
         .execution_options(populate_existing=True)
     )
     row = (await session.execute(stmt)).one_or_none()
@@ -68,14 +70,17 @@ async def _load_slot_snapshot(session: AsyncSession, slot_id: int) -> _SlotSnaps
     slot, is_past = row
     return _SlotSnapshot(slot=slot, is_past=bool(is_past))
 
-async def _lead_exists(session: AsyncSession, lead_id: int) -> bool:
-    stmt = select(select(Lead.id).where(Lead.id == lead_id).exists())
+def _lead_in_account(account_id: int, lead_id: int):
+    return select(Lead.id).where(Lead.id == lead_id, Lead.account_id == account_id).exists()
+
+async def _lead_exists(session: AsyncSession, *, account_id: int, lead_id: int) -> bool:
+    stmt = select(_lead_in_account(account_id, lead_id))
     return bool(await session.scalar(stmt))
 
 async def _explain_failed_booking(
-        session: AsyncSession, *, slot_id: int, lead_id: int
+        session: AsyncSession, *, account_id: int, slot_id: int, lead_id: int
 ) -> BookingResult:
-    snapshot = await _load_slot_snapshot(session, slot_id)
+    snapshot = await _load_slot_snapshot(session, account_id=account_id, slot_id=slot_id)
     if snapshot is None:
         raise SlotNotFoundError(f"Slot {slot_id} does not exist")
     holder_id = snapshot.slot.booked_by_lead_id
@@ -85,14 +90,14 @@ async def _explain_failed_booking(
         raise SlotInPastError(f"Slot {slot_id} has already started")
     if holder_id is not None:
         raise SlotUnavailableError(f"Slot {slot_id} is already booked")
-    if not await _lead_exists(session, lead_id):
+    if not await _lead_exists(session, account_id=account_id, lead_id=lead_id):
         raise LeadNotFoundError(f"Lead {lead_id} does not exist")
     raise SlotUnavailableError(f"Slot {slot_id} changed concurrently; please retry")
 
 async def _explain_failed_cancellation(
-        session: AsyncSession, *, slot_id: int, lead_id: int
+        session: AsyncSession, *, account_id: int, slot_id: int, lead_id: int
 ) -> CancellationResult:
-    snapshot = await _load_slot_snapshot(session, slot_id)
+    snapshot = await _load_slot_snapshot(session, account_id=account_id, slot_id=slot_id)
     if snapshot is None:
         raise SlotNotFoundError(f"Slot {slot_id} does not exist")
     holder_id = snapshot.slot.booked_by_lead_id
@@ -104,14 +109,21 @@ async def _explain_failed_cancellation(
         raise SlotInPastError(f"Slot {slot_id} has already started")
     raise SlotUnavailableError(f"Slot {slot_id} changed concurrently; please retry")
 
-async def find_slot_by_start(session: AsyncSession, start_at: datetime) -> Slot | None:
+async def find_slot_by_start(
+        session: AsyncSession, *, account_id: int, start_at: datetime
+) -> Slot | None:
     _require_aware(start_at, field="start_at")
-    stmt = select(Slot).where(Slot.start_at == start_at).execution_options(populate_existing=True)
+    stmt = (
+        select(Slot)
+        .where(Slot.account_id == account_id, Slot.start_at == start_at)
+        .execution_options(populate_existing=True)
+    )
     return (await session.scalars(stmt)).one_or_none()
 
 async def check_availability(
         session: AsyncSession,
         *,
+        account_id: int,
         window_start: datetime,
         window_end: datetime,
         limit: int = DEFAULT_AVAILABILITY_LIMIT,
@@ -123,6 +135,7 @@ async def check_availability(
     stmt = (
         select(Slot)
         .where(
+            Slot.account_id == account_id,
             Slot.booked_by_lead_id.is_(None),
             Slot.start_at>=window_start,
             Slot.start_at<window_end,
@@ -133,15 +146,17 @@ async def check_availability(
     )
     return list((await session.scalars(stmt)).all())
 
-async def book_slot(session: AsyncSession, *, slot_id: int, lead_id: int) -> BookingResult:
-    lead_exists = select(Lead.id).where(Lead.id == lead_id).exists()
+async def book_slot(
+        session: AsyncSession, *, account_id: int, slot_id: int, lead_id: int
+) -> BookingResult:
     stmt = (
         update(Slot)
         .where(
             Slot.id == slot_id,
+            Slot.account_id == account_id,
             Slot.booked_by_lead_id.is_(None),
             Slot.start_at>func.now(),
-            lead_exists,
+            _lead_in_account(account_id, lead_id),
         )
         .values(booked_by_lead_id = lead_id)
         .returning(Slot)
@@ -150,15 +165,18 @@ async def book_slot(session: AsyncSession, *, slot_id: int, lead_id: int) -> Boo
     booked_slot = (await session.scalars(stmt)).one_or_none()
     if booked_slot is not None:
         return BookingResult(slot=booked_slot, created=True)
-    return await _explain_failed_booking(session, slot_id=slot_id, lead_id=lead_id)
+    return await _explain_failed_booking(
+        session, account_id=account_id, slot_id=slot_id, lead_id=lead_id
+    )
 
 async def cancel_booking(
-        session: AsyncSession, *, slot_id: int, lead_id: int
+        session: AsyncSession, *, account_id: int, slot_id: int, lead_id: int
 ) -> CancellationResult:
     stmt = (
         update(Slot)
         .where(
             Slot.id == slot_id,
+            Slot.account_id == account_id,
             Slot.booked_by_lead_id == lead_id,
             Slot.start_at > func.now(),
         )
@@ -169,4 +187,6 @@ async def cancel_booking(
     freed_slot = (await session.scalars(stmt)).one_or_none()
     if freed_slot is not None:
         return CancellationResult(slot=freed_slot, cancelled=True)
-    return await _explain_failed_cancellation(session, slot_id=slot_id, lead_id=lead_id)
+    return await _explain_failed_cancellation(
+        session, account_id=account_id, slot_id=slot_id, lead_id=lead_id
+    )
