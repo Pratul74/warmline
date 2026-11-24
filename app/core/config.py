@@ -38,6 +38,9 @@ class Settings(BaseSettings):
 
     public_chat_base_url: str = "http://localhost:8000"
 
+    public_chat_rate_limit: int = Field(default=20, ge=1)
+    public_chat_rate_window_seconds: int = Field(default=60, ge=1, le=86400)
+
     @field_validator("secret_key")
     @classmethod
     def _long_secret_key(cls, value: SecretStr) -> SecretStr:
