@@ -51,8 +51,8 @@ POST /public/c/{public_id}/messages {message, conversation_token?}   (no login)
 | `app/agent/loop.py` | The agent loop, the tool allowlist, argument validation and the retry cap. |
 | `app/agent/tools.py` | Tool definitions: a Pydantic input model + handler for each tool. |
 | `app/agent/prompts.py` | The system prompt, with today's date added on each request. |
-| `app/services/` | Business logic: chat orchestration, owner accounts and login, integrations (chat links), leads, FAQ search, slot availability, the audit log. |
-| `app/api/` | Thin FastAPI routes (`/auth/*`, `/chat`, `/integrations`) and request/response schemas. |
+| `app/services/` | Business logic: chat orchestration, owner accounts and login, integrations (chat links), public chat through a link, the per-link rate limit, leads, FAQ search, slot availability, the audit log. |
+| `app/api/` | Thin FastAPI routes (`/auth/*`, `/chat`, `/integrations`, `/public/c/*`) and request/response schemas. |
 | `app/db/` | SQLAlchemy models and the database session. |
 | `migrations/` | Alembic migrations. |
 | `scripts/` | `seed_faq.py` (fake FAQ data), `seed_slots.py` (fake slots for the next 14 days), `smoke_gemini.py` (a one-off Gemini function-calling check). |
@@ -67,8 +67,8 @@ POST /public/c/{public_id}/messages {message, conversation_token?}   (no login)
 - **No double booking.** Booking is one `UPDATE slots SET booked_by_lead_id = ... WHERE id = ... AND booked_by_lead_id IS NULL AND start_at > now()`. If two customers confirm the same slot at once, Postgres makes the second `UPDATE` wait for the first one's row lock and then re-check the condition, so it changes nothing and the customer is told the slot is taken. A test runs this with two real database connections.
 - **Slots are named by date and time, not id.** `book_slot` and `cancel_booking` take the slot's local date and start time, because the conversation history keeps only text and the model no longer has slot ids from an earlier turn.
 - **Audit log in the same transaction.** Each tool call is stored with its arguments, status (`ok`, `validation_error`, `rejected`, `error`), result or error, and duration. It is saved together with the messages, so the log never disagrees with the data.
-- **Cost and latency per request.** Every `/chat` request writes one `request_logs` row: status (`ok`, `rate_limited`, `model_error`), model, steps, input and output tokens, latency and cost. Cost uses `Decimal` and the configured per-1M-token prices. The row shares its `request_id` with the request's `tool_calls` rows. A successful request is logged in the same transaction as its messages; a failed one is logged after the rollback, in its own transaction (with no conversation if the conversation was new). Each request also writes one INFO line to the server log.
-- **Owner accounts with password login.** A business owner registers with email, password and business name (`POST /auth/register`) and logs in (`POST /auth/login`) to get a JWT access token. Passwords are stored as Argon2id hashes, hashed in a worker thread so the event loop keeps serving. Tokens are signed with `SECRET_KEY` (HS256, at least 32 characters, checked at startup) and expire after `ACCESS_TOKEN_EXPIRE_MINUTES`; the server only accepts its own algorithm. A wrong password and an unknown email get the same answer, and an unknown email still runs a password check so timing does not reveal which emails have accounts. `POST /chat` is owner-only: each conversation belongs to one account, and another account's conversation id gets the same 404 as a missing one. (End customers will reach the chat through integration links; the public side of those is not built yet.)
+- **Cost and latency per request.** Every chat request (owner `/chat` and public link messages) writes one `request_logs` row: status (`ok`, `rate_limited`, `model_error`), model, steps, input and output tokens, latency and cost. Cost uses `Decimal` and the configured per-1M-token prices. The row shares its `request_id` with the request's `tool_calls` rows. A successful request is logged in the same transaction as its messages; a failed one is logged after the rollback, in its own transaction (with no conversation if the conversation was new). Each request also writes one INFO line to the server log.
+- **Owner accounts with password login.** A business owner registers with email, password and business name (`POST /auth/register`) and logs in (`POST /auth/login`) to get a JWT access token. Passwords are stored as Argon2id hashes, hashed in a worker thread so the event loop keeps serving. Tokens are signed with `SECRET_KEY` (HS256, at least 32 characters, checked at startup) and expire after `ACCESS_TOKEN_EXPIRE_MINUTES`; the server only accepts its own algorithm. A wrong password and an unknown email get the same answer, and an unknown email still runs a password check so timing does not reveal which emails have accounts. `POST /chat` is owner-only: each conversation belongs to one account, and another account's conversation id gets the same 404 as a missing one. End customers do not log in: they chat through an integration link (see below).
 - **Integrations (chat links).** An owner creates integrations with `POST /integrations` (a name and an optional greeting) and manages them with `GET /integrations`, `GET`/`PATCH /integrations/{id}` and `POST /integrations/{id}/rotate`. Each integration has a random `public_id` (`secrets.token_urlsafe(16)`, 128 bits): it goes in the link, is not a secret, and cannot be guessed from another one. The link is `PUBLIC_CHAT_BASE_URL/c/<public_id>`. Disabling (`PATCH` with `enabled: false`) keeps the row and its history; rotating gives the same integration a new `public_id`, so the old link stops working. There is no delete. The owner API uses the stable internal id, because `public_id` changes on rotation; another account's integration gets the same 404 as a missing one.
 - **Public chat through a link (no login).** `GET /public/c/{public_id}` returns the integration's name, greeting and business name; `POST /public/c/{public_id}/messages` sends a visitor's message. The owner is found only by looking the `public_id` up in the `integrations` table, never from anything the visitor sends (extra fields such as `account_id` are refused). Unknown and rotated links answer 404, disabled links 403. The first message returns a `conversation_token` (`secrets.token_urlsafe(32)`), which the visitor sends with later messages. Only its SHA-256 hash is stored, and it only works on the link it was issued for. The response never contains internal ids. These are the API routes; the page at the link (`PUBLIC_CHAT_BASE_URL/c/<public_id>`) is built in Phase 4.
 - **Rate limit per chat link.** Each integration accepts at most `PUBLIC_CHAT_RATE_LIMIT` messages per `PUBLIC_CHAT_RATE_WINDOW_SECONDS` (default 20 per 60 seconds), from all visitors together, so the owner's model spend has a ceiling. The count is a row per link per fixed window in the `rate_limit_counters` table, increased with one atomic `INSERT ... ON CONFLICT DO UPDATE ... RETURNING count`, so simultaneous requests and several app copies count correctly. The count is committed before the token check and before the model call, so wrong tokens and failed model calls use up the limit too. Over the limit, the route answers 429 with a `Retry-After` header and the model is not called. Unknown and disabled links are refused before counting; the profile `GET` is not limited.
@@ -189,18 +189,21 @@ All settings come from environment variables (or `.env`). See `.env.example`.
   one `public_id`); the old link itself answers 404. The owner can also continue a public
   conversation through `POST /chat`, because it belongs to their account.
 - Integrations: rotating replaces the `public_id` at once, with no grace period for the old
-  link. The owner API has no paging; an owner with many integrations gets them all in one list.
-
+  link. The owner API has no paging and no cap on how many integrations an owner creates; an
+  owner with many integrations gets them all in one list. `PUBLIC_CHAT_BASE_URL` is only checked
+  for its format, not that it really serves the chat. In the (practically impossible) case of
+  two random `public_id`s colliding, the create or rotate request fails with 503 instead of
+  trying again.
 - Request logs: embedding calls (FAQ search) are not counted. Latency is measured inside
   the chat service, so it excludes HTTP and request parsing. Prices are set
   by hand in the environment. A database failure cannot be logged in the
   database; it only reaches the server log.
 - At INFO level, the HTTP library also logs each Gemini request URL (the API
   key is sent in a header, not in the URL).
-- `POST /chat` returns 429 when Gemini's rate limit persists after retries,
-  503 for other model failures, and 503 with a generic message for database
-  failures (details go to the server log only). The 429 has no `Retry-After`
-  header. Timeouts and network errors are not retried, and the 429/503
+- `POST /chat` and the public messages route return 429 when Gemini's rate
+  limit persists after retries, 503 for other model failures, and 503 with a
+  generic message for database failures (details go to the server log only).
+  That 429 has no `Retry-After` header (only the per-link limit's 429 has one). Timeouts and network errors are not retried, and the 429/503
   retry waits are fixed (no jitter).
 - If the database fails while a tool is running, the tool reports an
   internal error to the model and the model makes one more call before the
@@ -214,10 +217,10 @@ All settings come from environment variables (or `.env`). See `.env.example`.
 - If a slot is taken between the proposal and the "yes", nothing is saved
   and the pending action stays pending; the model is told to offer another
   time.
-- `POST /chat` is owner-only and checks that the conversation belongs to the
-  caller's account. Conversation ids are still sequential numbers; that is
-  fine for owners, but the public end-customer entry point (not built yet)
-  must not expose them.
+- Conversation ids are sequential numbers. Only owners use them, through
+  `POST /chat`, which checks that the conversation belongs to the caller's
+  account. The public routes never return them; visitors get a random
+  conversation token instead.
 - Owner accounts: there is no rate limit on `/auth/login` or
   `/auth/register` (password guessing and sign-up spam are possible), no
   email verification, no password reset and no logout. A token stays valid
