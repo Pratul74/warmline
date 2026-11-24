@@ -1,6 +1,7 @@
+from datetime import datetime
 from typing import Annotated
 
-from pydantic import BaseModel, Field, StringConstraints
+from pydantic import BaseModel, ConfigDict, Field, StringConstraints
 
 MAX_MESSAGE_CHARS = 2000
 
@@ -38,3 +39,30 @@ class AccountResponse(BaseModel):
     id: int
     email: str
     business_name: str
+
+
+class IntegrationCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    name: Annotated[str, StringConstraints(max_length=100)]
+    greeting: Annotated[str, StringConstraints(max_length=500)] | None = None
+
+
+class IntegrationUpdate(BaseModel):
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: Annotated[str, StringConstraints(max_length=100)] | None = None
+    greeting: Annotated[str, StringConstraints(max_length=500)] | None = None
+    enabled: bool | None = None
+
+
+class IntegrationResponse(BaseModel):
+    id: int
+    public_id: str
+    embed_url: str
+    name: str
+    greeting: str | None
+    status: str
+    created_at: datetime
+    disabled_at: datetime | None
