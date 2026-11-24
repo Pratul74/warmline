@@ -1,9 +1,10 @@
+import argparse
 import asyncio
 
 from sqlalchemy import select
 
 from app.core.llm import embed_documents
-from app.db.models import FaqEntry
+from app.db.models import Account, FaqEntry
 from app.db.session import dispose_engine, get_sessionmaker
 
 
@@ -19,9 +20,15 @@ FAQS: list[tuple[str, str]] = [
 ]
 
 
-async def seed() -> None:
+async def seed(account_id: int) -> None:
     async with get_sessionmaker()() as session:
-        existing = set(await session.scalars(select(FaqEntry.question)))
+        if await session.get(Account, account_id) is None:
+            raise SystemExit(f"Account {account_id} does not exist.")
+        existing = set(
+            await session.scalars(
+                select(FaqEntry.question).where(FaqEntry.account_id == account_id)
+            )
+        )
         new = [(q, a) for q, a in FAQS if q not in existing]
         if not new:
             print(f"Nothing to do: all {len(FAQS)} FAQ entries already exist.")
@@ -29,15 +36,22 @@ async def seed() -> None:
 
         vectors = await embed_documents(new)
         session.add_all(
-            FaqEntry(question=q, answer=a, embedding=v) for (q, a), v in zip(new, vectors, strict=True)
+            FaqEntry(account_id=account_id, question=q, answer=a, embedding=v)
+            for (q, a), v in zip(new, vectors, strict=True)
         )
         await session.commit()
-        print(f"Inserted {len(new)} FAQ entries ({len(FAQS) - len(new)} already existed).")
+        print(
+            f"Account {account_id}: inserted {len(new)} FAQ entries "
+            f"({len(FAQS) - len(new)} already existed)."
+        )
 
 
 async def main() -> None:
+    parser = argparse.ArgumentParser(description="Seed fake FAQ entries for one account.")
+    parser.add_argument("--account-id", type=int, required=True)
+    args = parser.parse_args()
     try:
-        await seed()
+        await seed(args.account_id)
     finally:
         await dispose_engine()
 
