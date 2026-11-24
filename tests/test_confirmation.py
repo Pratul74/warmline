@@ -11,7 +11,7 @@ from app.agent.tools import (
     build_tools,
 )
 from app.core.llm import ToolCall
-from app.db.models import Lead, PendingAction, PendingActionStatus
+from app.db.models import Conversation, Lead, PendingAction, PendingActionStatus
 from app.services.pending_actions import (
     PendingActionExpiredError,
     PendingActionNotPendingError,
@@ -25,8 +25,12 @@ ROBIN = {"name": " Robin Fake ", "email": "Robin@Example.TEST"}
 
 
 @pytest.fixture
-async def conversation_id(session) -> int:
-    conversation = await new_conversation(session)
+async def conversation(session) -> Conversation:
+    return await new_conversation(session)
+
+
+@pytest.fixture
+def conversation_id(conversation) -> int:
     return conversation.id
 
 
@@ -53,8 +57,10 @@ async def expire_all(session, conversation_id: int) -> None:
 
 class Request:
 
-    def __init__(self, session, conversation_id: int):
-        self.tools = build_tools(session, conversation_id=conversation_id)
+    def __init__(self, session, conversation: Conversation):
+        self.tools = build_tools(
+            session, account_id=conversation.account_id, conversation_id=conversation.id
+        )
 
     async def call(self, name: str, args: dict | None = None) -> tuple[dict, str]:
         return await run_tool(ToolCall(name=name, args=args or {}), self.tools)
@@ -94,8 +100,8 @@ async def test_service_claim_of_an_expired_action_fails(session, conversation_id
         await claim_pending_action(session, action_id=action.id, conversation_id=conversation_id)
 
 
-async def test_create_lead_only_proposes_and_saves_nothing(session, conversation_id):
-    output, status = await Request(session, conversation_id).call("create_lead", ROBIN)
+async def test_create_lead_only_proposes_and_saves_nothing(session, conversation_id, conversation):
+    output, status = await Request(session, conversation).call("create_lead", ROBIN)
 
     assert status == "ok"
     assert output["status"] == "awaiting_confirmation"
@@ -109,8 +115,8 @@ async def test_create_lead_only_proposes_and_saves_nothing(session, conversation
     assert await statuses(session, conversation_id) == [PENDING]
 
 
-async def test_invalid_email_is_rejected_before_asking_the_customer(session, conversation_id):
-    output, status = await Request(session, conversation_id).call(
+async def test_invalid_email_is_rejected_before_asking_the_customer(session, conversation_id, conversation):
+    output, status = await Request(session, conversation).call(
         "create_lead", {"name": "Robin", "email": "no-at-sign"}
     )
 
@@ -118,8 +124,8 @@ async def test_invalid_email_is_rejected_before_asking_the_customer(session, con
     assert await statuses(session, conversation_id) == []
 
 
-async def test_confirm_in_the_same_request_is_refused(session, conversation_id):
-    request = Request(session, conversation_id)
+async def test_confirm_in_the_same_request_is_refused(session, conversation_id, conversation):
+    request = Request(session, conversation)
     await request.call("create_lead", ROBIN)
 
     output, status = await request.call("confirm_pending_action")
@@ -129,11 +135,11 @@ async def test_confirm_in_the_same_request_is_refused(session, conversation_id):
     assert await statuses(session, conversation_id) == [PENDING]
 
 
-async def test_confirm_in_a_later_request_saves_the_lead_once(session, conversation_id):
-    await Request(session, conversation_id).call("create_lead", ROBIN)
+async def test_confirm_in_a_later_request_saves_the_lead_once(session, conversation_id, conversation):
+    await Request(session, conversation).call("create_lead", ROBIN)
 
-    output, status = await Request(session, conversation_id).call("confirm_pending_action")
-    again, again_status = await Request(session, conversation_id).call("confirm_pending_action")
+    output, status = await Request(session, conversation).call("confirm_pending_action")
+    again, again_status = await Request(session, conversation).call("confirm_pending_action")
 
     lead = await session.scalar(select(Lead))
     assert status == "ok"
@@ -144,12 +150,12 @@ async def test_confirm_in_a_later_request_saves_the_lead_once(session, conversat
     assert await statuses(session, conversation_id) == [PendingActionStatus.CONFIRMED]
 
 
-async def test_cancel_drops_the_action_and_nothing_is_saved(session, conversation_id):
-    await Request(session, conversation_id).call("create_lead", ROBIN)
+async def test_cancel_drops_the_action_and_nothing_is_saved(session, conversation_id, conversation):
+    await Request(session, conversation).call("create_lead", ROBIN)
 
-    cancelled, _ = await Request(session, conversation_id).call("decline_pending_action")
-    confirm, _ = await Request(session, conversation_id).call("confirm_pending_action")
-    nothing, nothing_status = await Request(session, conversation_id).call("decline_pending_action")
+    cancelled, _ = await Request(session, conversation).call("decline_pending_action")
+    confirm, _ = await Request(session, conversation).call("confirm_pending_action")
+    nothing, nothing_status = await Request(session, conversation).call("decline_pending_action")
 
     assert cancelled == {"cancelled": "create_lead"}
     assert confirm == {"error": NOTHING_PENDING_ERROR}
@@ -158,13 +164,13 @@ async def test_cancel_drops_the_action_and_nothing_is_saved(session, conversatio
     assert await statuses(session, conversation_id) == [PendingActionStatus.CANCELLED]
 
 
-async def test_corrected_details_replace_the_earlier_proposal(session, conversation_id):
-    await Request(session, conversation_id).call("create_lead", ROBIN)
-    await Request(session, conversation_id).call(
+async def test_corrected_details_replace_the_earlier_proposal(session, conversation_id, conversation):
+    await Request(session, conversation).call("create_lead", ROBIN)
+    await Request(session, conversation).call(
         "create_lead", {"name": "Robin Fake", "email": "robin.work@example.test"}
     )
 
-    await Request(session, conversation_id).call("confirm_pending_action")
+    await Request(session, conversation).call("confirm_pending_action")
 
     emails = list(await session.scalars(select(Lead.email)))
     assert emails == ["robin.work@example.test"]
@@ -174,35 +180,35 @@ async def test_corrected_details_replace_the_earlier_proposal(session, conversat
     ]
 
 
-async def test_expired_action_cannot_be_confirmed(session, conversation_id):
-    await Request(session, conversation_id).call("create_lead", ROBIN)
+async def test_expired_action_cannot_be_confirmed(session, conversation_id, conversation):
+    await Request(session, conversation).call("create_lead", ROBIN)
     await expire_all(session, conversation_id)
 
-    output, status = await Request(session, conversation_id).call("confirm_pending_action")
+    output, status = await Request(session, conversation).call("confirm_pending_action")
 
     assert (status, output) == ("error", {"error": NOTHING_PENDING_ERROR})
     assert await lead_count(session) == 0
 
 
-async def test_another_conversation_cannot_confirm(session, conversation_id):
+async def test_another_conversation_cannot_confirm(session, conversation):
     other = await new_conversation(session)
-    await Request(session, conversation_id).call("create_lead", ROBIN)
+    await Request(session, conversation).call("create_lead", ROBIN)
 
-    output, _ = await Request(session, other.id).call("confirm_pending_action")
+    output, _ = await Request(session, other).call("confirm_pending_action")
 
     assert output == {"error": NOTHING_PENDING_ERROR}
     assert await lead_count(session) == 0
 
 
-async def test_failed_write_undoes_the_claim_so_the_action_stays_pending(session, conversation_id):
-    await Request(session, conversation_id).call("create_lead", ROBIN)
+async def test_failed_write_undoes_the_claim_so_the_action_stays_pending(session, conversation_id, conversation):
+    await Request(session, conversation).call("create_lead", ROBIN)
     await session.execute(
         update(PendingAction)
         .where(PendingAction.conversation_id == conversation_id)
         .values(arguments={"name": "Robin", "email": "broken"})
     )
 
-    output, status = await Request(session, conversation_id).call("confirm_pending_action")
+    output, status = await Request(session, conversation).call("confirm_pending_action")
 
     assert status == "error"
     assert "internal error" in output["error"]
@@ -210,8 +216,8 @@ async def test_failed_write_undoes_the_claim_so_the_action_stays_pending(session
     assert await statuses(session, conversation_id) == [PENDING]
 
 
-async def test_confirm_rejects_arguments(session, conversation_id):
-    output, status = await Request(session, conversation_id).call(
+async def test_confirm_rejects_arguments(session, conversation):
+    output, status = await Request(session, conversation).call(
         "confirm_pending_action", {"action_id": 1}
     )
 
@@ -220,11 +226,11 @@ async def test_confirm_rejects_arguments(session, conversation_id):
 
 
 async def test_identical_proposal_in_a_later_request_keeps_the_action_and_confirm_works(
-    session, conversation_id
+    session, conversation_id, conversation
 ):
-    await Request(session, conversation_id).call("create_lead", ROBIN)
+    await Request(session, conversation).call("create_lead", ROBIN)
 
-    yes_turn = Request(session, conversation_id)
+    yes_turn = Request(session, conversation)
     repeated, _ = await yes_turn.call("create_lead", ROBIN)
     confirmed, status = await yes_turn.call("confirm_pending_action")
 
@@ -235,11 +241,11 @@ async def test_identical_proposal_in_a_later_request_keeps_the_action_and_confir
 
 
 async def test_changed_proposal_in_a_later_request_still_replaces_and_needs_a_new_yes(
-    session, conversation_id
+    session, conversation_id, conversation
 ):
-    await Request(session, conversation_id).call("create_lead", ROBIN)
+    await Request(session, conversation).call("create_lead", ROBIN)
 
-    turn = Request(session, conversation_id)
+    turn = Request(session, conversation)
     changed, _ = await turn.call("create_lead", {**ROBIN, "email": "robin.new@example.test"})
     refused, _ = await turn.call("confirm_pending_action")
 
@@ -250,9 +256,9 @@ async def test_changed_proposal_in_a_later_request_still_replaces_and_needs_a_ne
 
 
 async def test_identical_proposal_twice_in_the_same_request_cannot_be_confirmed(
-    session, conversation_id
+    session, conversation
 ):
-    turn = Request(session, conversation_id)
+    turn = Request(session, conversation)
     await turn.call("create_lead", ROBIN)
     repeated, _ = await turn.call("create_lead", ROBIN)
 
