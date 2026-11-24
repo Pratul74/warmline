@@ -12,8 +12,7 @@ from app.core.llm import ChatResult, ToolCall
 from app.db.models import Slot
 from app.services.booking import InvalidBookingRequestError, check_availability
 from app.services.chat import handle_chat
-from app.services.lead import create_lead
-from tests.factories import new_account, new_conversation
+from tests.factories import new_account, new_conversation, new_lead, new_slot
 
 HOUR = timedelta(hours=1)
 
@@ -28,35 +27,39 @@ def utc_day(days_from_today: int) -> datetime:
     return today + timedelta(days=days_from_today)
 
 
-async def add_slot(session, start: datetime, *, booked_by: int | None = None) -> Slot:
-    slot = Slot(start_at=start, end_at=start + HOUR, booked_by_lead_id=booked_by)
-    session.add(slot)
-    await session.flush()
-    return slot
+@pytest.fixture
+async def account(session):
+    return await new_account(session)
 
 
-async def test_service_returns_only_free_future_slots_in_the_window_earliest_first(session):
+async def add_slot(session, account, start: datetime, *, booked_by: int | None = None) -> Slot:
+    return await new_slot(session, account.id, start, booked_by=booked_by)
+
+
+async def test_service_returns_only_free_future_slots_in_the_window_earliest_first(session, account):
     day = utc_day(10)
-    lead = (await create_lead(session, name="Booked Fake", email="booked@example.test")).lead
-    later = await add_slot(session, day + 15 * HOUR)
-    earlier = await add_slot(session, day + 10 * HOUR)
-    await add_slot(session, day + 12 * HOUR, booked_by=lead.id)
-    await add_slot(session, day + 30 * HOUR)
-    await add_slot(session, utc_day(-1) + 10 * HOUR)
+    lead = await new_lead(session, account.id, email="booked@example.test")
+    later = await add_slot(session, account, day + 15 * HOUR)
+    earlier = await add_slot(session, account, day + 10 * HOUR)
+    await add_slot(session, account, day + 12 * HOUR, booked_by=lead.id)
+    await add_slot(session, account, day + 30 * HOUR)
+    await add_slot(session, account, utc_day(-1) + 10 * HOUR)
 
     slots = await check_availability(
-        session, window_start=utc_day(-2), window_end=day + 24 * HOUR
+        session, account_id=account.id, window_start=utc_day(-2), window_end=day + 24 * HOUR
     )
 
     assert [s.id for s in slots] == [earlier.id, later.id]
 
 
-async def test_service_respects_the_limit(session):
+async def test_service_respects_the_limit(session, account):
     day = utc_day(10)
     for hour in range(8, 13):
-        await add_slot(session, day + hour * HOUR)
+        await add_slot(session, account, day + hour * HOUR)
 
-    slots = await check_availability(session, window_start=day, window_end=day + 24 * HOUR, limit=2)
+    slots = await check_availability(
+        session, account_id=account.id, window_start=day, window_end=day + 24 * HOUR, limit=2
+    )
 
     assert len(slots) == 2
 
@@ -70,25 +73,25 @@ async def test_service_respects_the_limit(session):
     ],
     ids=["naive_datetime", "end_before_start", "zero_limit"],
 )
-async def test_service_rejects_bad_requests(session, kwargs):
+async def test_service_rejects_bad_requests(session, account, kwargs):
     with pytest.raises(InvalidBookingRequestError):
-        await check_availability(session, **kwargs)
+        await check_availability(session, account_id=account.id, **kwargs)
 
 
-async def run_check(session, args: dict) -> tuple[dict, str]:
-    conversation = await new_conversation(session)
-    tools = build_tools(session, conversation_id=conversation.id)
+async def run_check(session, account, args: dict) -> tuple[dict, str]:
+    conversation = await new_conversation(session, account)
+    tools = build_tools(session, account_id=account.id, conversation_id=conversation.id)
     return await run_tool(ToolCall(name="check_availability", args=args), tools)
 
 
-async def test_tool_uses_the_business_time_zone_for_the_day(session, monkeypatch):
+async def test_tool_uses_the_business_time_zone_for_the_day(session, account, monkeypatch):
     monkeypatch.setattr(get_settings(), "business_timezone", "Asia/Kolkata")
     day = utc_day(10)
-    just_after_local_midnight = await add_slot(session, day - 5 * HOUR)
-    morning = await add_slot(session, day + 4.5 * HOUR)
-    await add_slot(session, day + 20 * HOUR)
+    just_after_local_midnight = await add_slot(session, account, day - 5 * HOUR)
+    morning = await add_slot(session, account, day + 4.5 * HOUR)
+    await add_slot(session, account, day + 20 * HOUR)
 
-    output, status = await run_check(session, {"start_date": day.date().isoformat()})
+    output, status = await run_check(session, account, {"start_date": day.date().isoformat()})
 
     assert status == "ok"
     assert output["timezone"] == "Asia/Kolkata"
@@ -99,23 +102,23 @@ async def test_tool_uses_the_business_time_zone_for_the_day(session, monkeypatch
     assert second["weekday"] == day.astimezone(ZoneInfo("Asia/Kolkata")).strftime("%A")
 
 
-async def test_tool_days_argument_widens_the_window(session):
+async def test_tool_days_argument_widens_the_window(session, account):
     day = utc_day(10)
-    await add_slot(session, day + 10 * HOUR)
-    await add_slot(session, day + 2 * 24 * HOUR + 10 * HOUR)
+    await add_slot(session, account, day + 10 * HOUR)
+    await add_slot(session, account, day + 2 * 24 * HOUR + 10 * HOUR)
 
-    one_day, _ = await run_check(session, {"start_date": day.date().isoformat()})
-    three_days, _ = await run_check(session, {"start_date": day.date().isoformat(), "days": 3})
+    one_day, _ = await run_check(session, account, {"start_date": day.date().isoformat()})
+    three_days, _ = await run_check(session, account, {"start_date": day.date().isoformat(), "days": 3})
 
     assert (len(one_day["slots"]), len(three_days["slots"])) == (1, 2)
 
 
-async def test_tool_returns_at_most_the_cap(session):
+async def test_tool_returns_at_most_the_cap(session, account):
     day = utc_day(10)
     for i in range(MAX_SLOTS_RETURNED + 3):
-        await add_slot(session, day + i * HOUR)
+        await add_slot(session, account, day + i * HOUR)
 
-    output, _ = await run_check(session, {"start_date": day.date().isoformat()})
+    output, _ = await run_check(session, account, {"start_date": day.date().isoformat()})
 
     assert len(output["slots"]) == MAX_SLOTS_RETURNED
 
@@ -132,8 +135,8 @@ async def test_tool_returns_at_most_the_cap(session):
     ],
     ids=["missing_date", "words", "impossible_date", "zero_days", "too_many_days", "unknown_field"],
 )
-async def test_tool_rejects_bad_arguments(session, args):
-    output, status = await run_check(session, args)
+async def test_tool_rejects_bad_arguments(session, account, args):
+    output, status = await run_check(session, account, args)
 
     assert status == "invalid_args"
     assert output["error"].startswith("Invalid arguments.")
