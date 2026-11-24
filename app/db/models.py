@@ -104,6 +104,18 @@ class Integration(Base):
     conversations: Mapped[list["Conversation"]] = relationship(back_populates="integration")
 
 
+class RateLimitCounter(Base):
+
+    __tablename__ = "rate_limit_counters"
+
+    integration_id: Mapped[int] = mapped_column(
+        ForeignKey("integrations.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    window_start: Mapped[datetime] = mapped_column(DateTime(timezone=True), primary_key=True)
+    count: Mapped[int] = mapped_column(Integer, nullable=False)
+
+
 class Lead(Base):
     __tablename__ = "leads"
     __table_args__ = (
