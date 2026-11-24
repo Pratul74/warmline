@@ -33,6 +33,10 @@ class RequestStatus(StrEnum):
     RATE_LIMITED = "rate_limited"
     MODEL_ERROR = "model_error"
 
+class IntegrationStatus(StrEnum):
+    ACTIVE = "active"
+    DISABLED = "disabled"
+
 class PendingActionStatus(StrEnum):
     PENDING = "pending"
     CONFIRMED = "confirmed"
@@ -64,6 +68,38 @@ class Account(Base):
     )
 
     conversations: Mapped[list["Conversation"]] = relationship(back_populates="account")
+
+    integrations: Mapped[list["Integration"]] = relationship(back_populates="account")
+
+
+class Integration(Base):
+
+    __tablename__ = "integrations"
+    __table_args__ = (
+        Index("ix_integrations_account_id", "account_id"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    account_id: Mapped[int] = mapped_column(
+        ForeignKey("accounts.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    public_id: Mapped[str] = mapped_column(String(32), nullable=False, unique=True)
+    name: Mapped[str] = mapped_column(String(100), nullable=False)
+    greeting: Mapped[str | None] = mapped_column(Text, nullable=True)
+    status: Mapped[IntegrationStatus] = mapped_column(
+        enum_column(IntegrationStatus),
+        nullable=False,
+        server_default=IntegrationStatus.ACTIVE.value,
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        nullable=False,
+    )
+    disabled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    account: Mapped["Account"] = relationship(back_populates="integrations")
 
 
 class Lead(Base):
