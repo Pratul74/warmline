@@ -53,6 +53,7 @@ async def search_faq(
         session: AsyncSession,
         query_embedding: Sequence[float],
         *,
+        account_id: int,
         top_k: int = DEFAULT_TOP_K,
         min_similarity: float | None = None,
 ) -> list[FaqMatch]:
@@ -63,6 +64,7 @@ async def search_faq(
     distance = FaqEntry.embedding.cosine_distance(vector)
     stmt = (
         select(FaqEntry.id, FaqEntry.question, FaqEntry.answer, distance.label("distance"))
+        .where(FaqEntry.account_id == account_id)
         .order_by(distance)
         .limit(limit)
     )
