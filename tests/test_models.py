@@ -9,7 +9,7 @@ from app.db.models import (
     Message,
     MessageRole,
 )
-from tests.factories import new_conversation
+from tests.factories import new_account, new_conversation
 
 
 async def test_expected_indexes_exist():
@@ -21,9 +21,11 @@ async def test_expected_indexes_exist():
     }
 
 
-async def test_lead_email_unique_case_insensitive(session):
+async def test_lead_email_unique_case_insensitive_within_an_account(session):
+    account = await new_account(session)
     session.add(
         Lead(
+            account_id=account.id,
             name="A",
             email="Bob@Example.com",
             status=LeadStatus.NEW,
@@ -33,6 +35,7 @@ async def test_lead_email_unique_case_insensitive(session):
 
     session.add(
         Lead(
+            account_id=account.id,
             name="B",
             email="bob@example.com",
             status=LeadStatus.NEW,
