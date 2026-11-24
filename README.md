@@ -40,6 +40,7 @@ POST /chat {message, conversation_id?}   Authorization: Bearer <owner token>
 POST /public/c/{public_id}/messages {message, conversation_token?}   (no login)
   └─ handle_public_chat()               app/services/public_chat.py
        ├─ look up the integration by public_id (404 unknown or rotated, 403 disabled)
+       ├─ count the message for this link and commit (429 + Retry-After if over the limit)
        ├─ with a token: find the conversation by the token's hash AND this integration (404 otherwise)
        └─ handle_chat() as above, with the integration's owner as the account
 ```
@@ -70,6 +71,7 @@ POST /public/c/{public_id}/messages {message, conversation_token?}   (no login)
 - **Owner accounts with password login.** A business owner registers with email, password and business name (`POST /auth/register`) and logs in (`POST /auth/login`) to get a JWT access token. Passwords are stored as Argon2id hashes, hashed in a worker thread so the event loop keeps serving. Tokens are signed with `SECRET_KEY` (HS256, at least 32 characters, checked at startup) and expire after `ACCESS_TOKEN_EXPIRE_MINUTES`; the server only accepts its own algorithm. A wrong password and an unknown email get the same answer, and an unknown email still runs a password check so timing does not reveal which emails have accounts. `POST /chat` is owner-only: each conversation belongs to one account, and another account's conversation id gets the same 404 as a missing one. (End customers will reach the chat through integration links; the public side of those is not built yet.)
 - **Integrations (chat links).** An owner creates integrations with `POST /integrations` (a name and an optional greeting) and manages them with `GET /integrations`, `GET`/`PATCH /integrations/{id}` and `POST /integrations/{id}/rotate`. Each integration has a random `public_id` (`secrets.token_urlsafe(16)`, 128 bits): it goes in the link, is not a secret, and cannot be guessed from another one. The link is `PUBLIC_CHAT_BASE_URL/c/<public_id>`. Disabling (`PATCH` with `enabled: false`) keeps the row and its history; rotating gives the same integration a new `public_id`, so the old link stops working. There is no delete. The owner API uses the stable internal id, because `public_id` changes on rotation; another account's integration gets the same 404 as a missing one.
 - **Public chat through a link (no login).** `GET /public/c/{public_id}` returns the integration's name, greeting and business name; `POST /public/c/{public_id}/messages` sends a visitor's message. The owner is found only by looking the `public_id` up in the `integrations` table, never from anything the visitor sends (extra fields such as `account_id` are refused). Unknown and rotated links answer 404, disabled links 403. The first message returns a `conversation_token` (`secrets.token_urlsafe(32)`), which the visitor sends with later messages. Only its SHA-256 hash is stored, and it only works on the link it was issued for. The response never contains internal ids. These are the API routes; the page at the link (`PUBLIC_CHAT_BASE_URL/c/<public_id>`) is built in Phase 4.
+- **Rate limit per chat link.** Each integration accepts at most `PUBLIC_CHAT_RATE_LIMIT` messages per `PUBLIC_CHAT_RATE_WINDOW_SECONDS` (default 20 per 60 seconds), from all visitors together, so the owner's model spend has a ceiling. The count is a row per link per fixed window in the `rate_limit_counters` table, increased with one atomic `INSERT ... ON CONFLICT DO UPDATE ... RETURNING count`, so simultaneous requests and several app copies count correctly. The count is committed before the token check and before the model call, so wrong tokens and failed model calls use up the limit too. Over the limit, the route answers 429 with a `Retry-After` header and the model is not called. Unknown and disabled links are refused before counting; the profile `GET` is not limited.
 - **Tests never call the API.** The model and the embedder are passed in as functions, and tests pass scripted fakes.
 
 ## Run it locally
@@ -139,7 +141,7 @@ docker compose exec db psql -U warmline -d warmline -c "CREATE DATABASE warmline
 uv run pytest -q
 ```
 
-- **241 tests** run against a real Postgres database, with a fake model and a fake embedder. They cover the LLM wrapper (with a fake SDK client), the agent loop, all seven tools, the confirmation flow, booking (including a two-connection double-booking test), request cost and latency logging, the audit log, the error responses, owner registration, login and tokens (including expired, tampered, wrong-key and `alg: none` tokens), isolation between accounts (one account cannot see or change another's leads, FAQ entries, slots or integrations), integration management (create, list, update, disable, rotate, refusals, a real commit), the public chat path (unknown, rotated and disabled links, tokens that only work on their own link, hashed storage, the link's owner deciding the FAQ), and the `/chat` API (owner-only, including the step limit and a crashing tool, end to end).
+- **253 tests** run against a real Postgres database, with a fake model and a fake embedder. They cover the LLM wrapper (with a fake SDK client), the agent loop, all seven tools, the confirmation flow, booking (including a two-connection double-booking test), request cost and latency logging, the audit log, the error responses, owner registration, login and tokens (including expired, tampered, wrong-key and `alg: none` tokens), isolation between accounts (one account cannot see or change another's leads, FAQ entries, slots or integrations), integration management (create, list, update, disable, rotate, refusals, a real commit), the public chat path (unknown, rotated and disabled links, tokens that only work on their own link, hashed storage, the link's owner deciding the FAQ), the per-link rate limit (exact limit, window reset, separate links, failed calls still counted, Retry-After, and twelve simultaneous requests counted exactly), and the `/chat` API (owner-only, including the step limit and a crashing tool, end to end).
 - **17 evals** (`tests/test_evals.py`) are customer-level scenarios run through the real chat service: FAQ hit, FAQ miss, lead captured (with confirmation), lead over several messages, bad arguments then fixed, retry give-up, unknown tool rejected, embedding outage, availability lookup, confirmation in the same turn refused, customer declines, details corrected before confirming, booking confirmed, booking proposed again on "yes" then confirmed, book then cancel, another business's FAQ and slot staying hidden, and a lead captured through a public link landing with the link's owner. Each checks the audit-log rows, the reply and the database.
 - **What the evals do not prove:** the model in them is scripted, so they test how this code handles each model behaviour, not whether Gemini chooses tools well. They don't test the system prompt or the 0.70 similarity threshold. There is no live evaluation against the real model.
 - **CI:** `.github/workflows/tests.yml` runs on every push and on pull requests to `main`, with a pgvector Postgres service container and placeholder settings (the Gemini key is a dummy, because no test calls the API). It first applies every migration to a separate empty database and runs `alembic check`, which fails if a model changed without a migration, then runs `uv run pytest -q`.
@@ -166,15 +168,21 @@ All settings come from environment variables (or `.env`). See `.env.example`.
 | `ALGORITHM` | Token signing algorithm: `HS256` (default), `HS384` or `HS512`. |
 | `ACCESS_TOKEN_EXPIRE_MINUTES` | Lifetime of a login token (default 30, 1 to 1440). |
 | `PUBLIC_CHAT_BASE_URL` | Where the hosted chat will be served; integration links are built from it (default `http://localhost:8000`, http or https, no query). |
+| `PUBLIC_CHAT_RATE_LIMIT` | Messages one chat link accepts per window, from all visitors together (default 20). |
+| `PUBLIC_CHAT_RATE_WINDOW_SECONDS` | Length of the rate limit window in seconds (default 60). |
 
 ## Not built yet
 
-- The public chat API works through integration links, but the hosted chat page that the link opens is Phase 4. No rate limiting yet (Phase 3, in progress), no frontend, no deployment, no dashboard or endpoint for the request logs, and no live evaluation set.
+- The public chat API works through integration links, but the hosted chat page that the link opens is Phase 4. No frontend, no deployment, no dashboard or endpoint for the request logs, and no live evaluation set.
 
 ## Known limitations
 
-- Public chat has **no rate limit yet** (next Phase 3 step): anyone with a link can send
-  messages and spend the owner's Gemini quota. Do not expose it publicly before that step.
+- Public chat rate limit: the limit is per link, for all visitors together; there is no
+  per-visitor or per-IP limit. It caps the owner's cost, but one visitor or bot can use up a
+  link's whole quota and block real customers until the window ends. A fixed window also
+  allows up to twice the limit in a short burst around a window boundary. Old counter rows
+  are never deleted (one small row per active link per window). Each message costs one extra
+  database write and commit.
 - Public chat: there is no route to read a conversation's earlier messages, no CORS setup and
   no hosted page yet (Phase 4). Conversation tokens never expire. A token from before a
   rotation keeps working on the new link (the conversation belongs to the integration, not to
