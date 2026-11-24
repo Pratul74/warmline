@@ -16,6 +16,7 @@ from app.services.public_chat import (
     get_public_profile,
     handle_public_chat,
 )
+from app.services.rate_limit import PublicRateLimitError
 
 logger = logging.getLogger(__name__)
 
@@ -23,6 +24,7 @@ router = APIRouter(prefix="/public/c", tags=["public chat"])
 
 PublicId = Path(max_length=32)
 UNAVAILABLE = "Service temporarily unavailable, please try again"
+TOO_MANY = "This chat is receiving too many messages, please try again shortly"
 
 
 @router.get("/{public_id}", response_model=PublicProfileResponse)
@@ -64,6 +66,10 @@ async def post_message(
         raise HTTPException(status_code=404, detail=str(exc))
     except LinkDisabledError as exc:
         raise HTTPException(status_code=403, detail=str(exc))
+    except PublicRateLimitError as exc:
+        raise HTTPException(
+            status_code=429, detail=TOO_MANY, headers={"Retry-After": str(exc.retry_after)}
+        )
     except ConversationNotFoundError:
         raise HTTPException(status_code=404, detail="Conversation not found")
     except LLMRateLimitError as exc:
