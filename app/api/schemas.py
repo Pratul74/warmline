@@ -66,3 +66,26 @@ class IntegrationResponse(BaseModel):
     status: str
     created_at: datetime
     disabled_at: datetime | None
+
+
+MAX_TOKEN_CHARS = 64
+
+
+class PublicChatRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    message: Annotated[
+        str, StringConstraints(strip_whitespace=True, min_length=1, max_length=MAX_MESSAGE_CHARS)
+    ]
+    conversation_token: Annotated[str, StringConstraints(min_length=1, max_length=MAX_TOKEN_CHARS)] | None = None
+
+
+class PublicChatResponse(BaseModel):
+    conversation_token: str
+    reply: str
+
+
+class PublicProfileResponse(BaseModel):
+    name: str
+    greeting: str | None
+    business_name: str
