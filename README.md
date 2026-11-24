@@ -44,8 +44,8 @@ POST /chat {message, conversation_id?}   Authorization: Bearer <owner token>
 | `app/agent/loop.py` | The agent loop, the tool allowlist, argument validation and the retry cap. |
 | `app/agent/tools.py` | Tool definitions: a Pydantic input model + handler for each tool. |
 | `app/agent/prompts.py` | The system prompt, with today's date added on each request. |
-| `app/services/` | Business logic: chat orchestration, owner accounts and login, leads, FAQ search, slot availability, the audit log. |
-| `app/api/` | Thin FastAPI routes (`/auth/*`, `/chat`) and request/response schemas. |
+| `app/services/` | Business logic: chat orchestration, owner accounts and login, integrations (chat links), leads, FAQ search, slot availability, the audit log. |
+| `app/api/` | Thin FastAPI routes (`/auth/*`, `/chat`, `/integrations`) and request/response schemas. |
 | `app/db/` | SQLAlchemy models and the database session. |
 | `migrations/` | Alembic migrations. |
 | `scripts/` | `seed_faq.py` (fake FAQ data), `seed_slots.py` (fake slots for the next 14 days), `smoke_gemini.py` (a one-off Gemini function-calling check). |
@@ -61,7 +61,8 @@ POST /chat {message, conversation_id?}   Authorization: Bearer <owner token>
 - **Slots are named by date and time, not id.** `book_slot` and `cancel_booking` take the slot's local date and start time, because the conversation history keeps only text and the model no longer has slot ids from an earlier turn.
 - **Audit log in the same transaction.** Each tool call is stored with its arguments, status (`ok`, `validation_error`, `rejected`, `error`), result or error, and duration. It is saved together with the messages, so the log never disagrees with the data.
 - **Cost and latency per request.** Every `/chat` request writes one `request_logs` row: status (`ok`, `rate_limited`, `model_error`), model, steps, input and output tokens, latency and cost. Cost uses `Decimal` and the configured per-1M-token prices. The row shares its `request_id` with the request's `tool_calls` rows. A successful request is logged in the same transaction as its messages; a failed one is logged after the rollback, in its own transaction (with no conversation if the conversation was new). Each request also writes one INFO line to the server log.
-- **Owner accounts with password login.** A business owner registers with email, password and business name (`POST /auth/register`) and logs in (`POST /auth/login`) to get a JWT access token. Passwords are stored as Argon2id hashes, hashed in a worker thread so the event loop keeps serving. Tokens are signed with `SECRET_KEY` (HS256, at least 32 characters, checked at startup) and expire after `ACCESS_TOKEN_EXPIRE_MINUTES`; the server only accepts its own algorithm. A wrong password and an unknown email get the same answer, and an unknown email still runs a password check so timing does not reveal which emails have accounts. `POST /chat` is owner-only: each conversation belongs to one account, and another account's conversation id gets the same 404 as a missing one. (End customers will reach the chat through integration links, which are not built yet.)
+- **Owner accounts with password login.** A business owner registers with email, password and business name (`POST /auth/register`) and logs in (`POST /auth/login`) to get a JWT access token. Passwords are stored as Argon2id hashes, hashed in a worker thread so the event loop keeps serving. Tokens are signed with `SECRET_KEY` (HS256, at least 32 characters, checked at startup) and expire after `ACCESS_TOKEN_EXPIRE_MINUTES`; the server only accepts its own algorithm. A wrong password and an unknown email get the same answer, and an unknown email still runs a password check so timing does not reveal which emails have accounts. `POST /chat` is owner-only: each conversation belongs to one account, and another account's conversation id gets the same 404 as a missing one. (End customers will reach the chat through integration links; the public side of those is not built yet.)
+- **Integrations (chat links).** An owner creates integrations with `POST /integrations` (a name and an optional greeting) and manages them with `GET /integrations`, `GET`/`PATCH /integrations/{id}` and `POST /integrations/{id}/rotate`. Each integration has a random `public_id` (`secrets.token_urlsafe(16)`, 128 bits): it goes in the link, is not a secret, and cannot be guessed from another one. The link is `PUBLIC_CHAT_BASE_URL/c/<public_id>`. Disabling (`PATCH` with `enabled: false`) keeps the row and its history; rotating gives the same integration a new `public_id`, so the old link stops working. There is no delete. The owner API uses the stable internal id, because `public_id` changes on rotation; another account's integration gets the same 404 as a missing one.
 - **Tests never call the API.** The model and the embedder are passed in as functions, and tests pass scripted fakes.
 
 ## Run it locally
@@ -96,6 +97,9 @@ curl -X POST localhost:8000/chat -H "Content-Type: application/json" -H "Authori
 # continue the same conversation by sending the returned conversation_id:
 curl -X POST localhost:8000/chat -H "Content-Type: application/json" -H "Authorization: Bearer $TOKEN" \
      -d '{"conversation_id": 1, "message": "Please call me back. I am Sam Fake, sam@example.test"}'
+# create a chat link (integration) and list your links:
+curl -X POST localhost:8000/integrations -H "Content-Type: application/json" -H "Authorization: Bearer $TOKEN"      -d '{"name": "Website chat", "greeting": "Hi! Ask us about bike repairs."}'
+curl localhost:8000/integrations -H "Authorization: Bearer $TOKEN"
 ```
 
 ## Run it with Docker Compose
@@ -122,7 +126,7 @@ docker compose exec db psql -U warmline -d warmline -c "CREATE DATABASE warmline
 uv run pytest -q
 ```
 
-- **186 tests** run against a real Postgres database, with a fake model and a fake embedder. They cover the LLM wrapper (with a fake SDK client), the agent loop, all seven tools, the confirmation flow, booking (including a two-connection double-booking test), request cost and latency logging, the audit log, the error responses, owner registration, login and tokens (including expired, tampered, wrong-key and `alg: none` tokens), isolation between accounts (one account cannot see or change another's leads, FAQ entries or slots), and the `/chat` API (owner-only, including the step limit and a crashing tool, end to end).
+- **220 tests** run against a real Postgres database, with a fake model and a fake embedder. They cover the LLM wrapper (with a fake SDK client), the agent loop, all seven tools, the confirmation flow, booking (including a two-connection double-booking test), request cost and latency logging, the audit log, the error responses, owner registration, login and tokens (including expired, tampered, wrong-key and `alg: none` tokens), isolation between accounts (one account cannot see or change another's leads, FAQ entries, slots or integrations), integration management (create, list, update, disable, rotate, refusals, a real commit), and the `/chat` API (owner-only, including the step limit and a crashing tool, end to end).
 - **16 evals** (`tests/test_evals.py`) are customer-level scenarios run through the real chat service: FAQ hit, FAQ miss, lead captured (with confirmation), lead over several messages, bad arguments then fixed, retry give-up, unknown tool rejected, embedding outage, availability lookup, confirmation in the same turn refused, customer declines, details corrected before confirming, booking confirmed, booking proposed again on "yes" then confirmed, book then cancel, and another business's FAQ and slot staying hidden. Each checks the audit-log rows, the reply and the database.
 - **What the evals do not prove:** the model in them is scripted, so they test how this code handles each model behaviour, not whether Gemini chooses tools well. They don't test the system prompt or the 0.70 similarity threshold. There is no live evaluation against the real model.
 - **CI:** `.github/workflows/tests.yml` runs on every push and on pull requests to `main`, with a pgvector Postgres service container and placeholder settings (the Gemini key is a dummy, because no test calls the API). It first applies every migration to a separate empty database and runs `alembic check`, which fails if a model changed without a migration, then runs `uv run pytest -q`.
@@ -148,12 +152,18 @@ All settings come from environment variables (or `.env`). See `.env.example`.
 | `SECRET_KEY` | Signs owner login tokens. At least 32 characters (the app refuses to start otherwise). Never commit it; changing it logs everyone out. |
 | `ALGORITHM` | Token signing algorithm: `HS256` (default), `HS384` or `HS512`. |
 | `ACCESS_TOKEN_EXPIRE_MINUTES` | Lifetime of a login token (default 30, 1 to 1440). |
+| `PUBLIC_CHAT_BASE_URL` | Where the hosted chat will be served; integration links are built from it (default `http://localhost:8000`, http or https, no query). |
 
 ## Not built yet
 
-- No integration links for end customers yet (Phase 3, in progress), no frontend, no deployment, no dashboard or endpoint for the request logs, and no live evaluation set.
+- Integration links can be created but do not open a chat yet: the public endpoint is the next Phase 3 step and the hosted chat page is Phase 4. No rate limiting yet (Phase 3, in progress), no frontend, no deployment, no dashboard or endpoint for the request logs, and no live evaluation set.
 
 ## Known limitations
+
+- Integrations: the links are created and managed, but nothing serves `/c/<public_id>` yet, and
+  conversations do not record which integration they came from yet (both come with the public
+  endpoint). Rotating replaces the `public_id` at once, with no grace period for the old link.
+  The owner API has no paging; an owner with many integrations gets them all in one list.
 
 - Request logs: embedding calls (FAQ search) are not counted. Latency is measured inside
   the chat service, so it excludes HTTP and request parsing. Prices are set
