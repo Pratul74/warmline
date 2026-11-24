@@ -12,11 +12,10 @@ from app.agent.loop import INVALID_ARGS_REPLY
 from app.agent.tools import NOT_CONFIRMED_YET_ERROR
 from app.core.config import EMBEDDING_DIM, get_settings
 from app.core.llm import ChatResult, LLMError, ToolCall
-from app.db.models import Conversation, FaqEntry, Lead, Slot, ToolCallStatus
+from app.db.models import Conversation, Lead, Slot, ToolCallStatus
 from app.db.models import ToolCall as ToolCallRow
 from app.services.chat import handle_chat
-from app.services.lead import create_lead
-from tests.factories import new_account
+from tests.factories import new_account, new_faq, new_lead, new_slot
 
 OK = ToolCallStatus.OK
 INVALID = ToolCallStatus.VALIDATION_ERROR
@@ -66,7 +65,6 @@ class Outcome:
     model: ScriptedChat
 
     def tool_result_sent(self, model_call: int) -> dict:
-        """The tool result the model saw at the start of its Nth call (0-based)."""
         return self.model.seen[model_call][-1].tool_result
 
 
@@ -81,7 +79,7 @@ class EvalCase:
     expected_tools: list[tuple[str, ToolCallStatus]]
     expected_reply: str
     check: Check | None = None
-    setup: Callable[[AsyncSession], Awaitable[None]] | None = None
+    setup: Callable[[AsyncSession, int], Awaitable[None]] | None = None  # gets the account id
     embedder: Callable[[str], Awaitable[list[float]]] = field(default=keyword_embedder)
 
 
@@ -90,19 +88,18 @@ async def lead_count(session: AsyncSession) -> int:
 
 
 async def run_case(session: AsyncSession, case: EvalCase) -> Outcome:
-    session.add(
-        FaqEntry(
-            question="What are your opening hours?",
-            answer="9am to 6pm, Monday to Saturday.",
-            embedding=unit(0),
-        )
+    account = await new_account(session)
+    await new_faq(
+        session,
+        account.id,
+        question="What are your opening hours?",
+        answer="9am to 6pm, Monday to Saturday.",
+        embedding=unit(0),
     )
-    await session.flush()
     if case.setup:
-        await case.setup(session)
+        await case.setup(session, account.id)
 
     model = ScriptedChat(case.script)
-    account = await new_account(session)
     conversation_id = None
     outcome = Outcome(conversation_ids=[], replies=[], model=model)
     for message in case.turns:
@@ -166,8 +163,8 @@ async def no_lead_saved(session, out: Outcome) -> None:
     assert await lead_count(session) == 0
 
 
-async def add_existing_lead(session) -> None:
-    await create_lead(session, name="Old Customer", email="old.fake@example.test")
+async def add_existing_lead(session, account_id: int) -> None:
+    await new_lead(session, account_id, name="Old Customer", email="old.fake@example.test")
 
 
 async def existing_lead_untouched(session, out: Outcome) -> None:
@@ -182,13 +179,12 @@ async def outage_reported_to_model(session, out: Outcome) -> None:
 SLOT_DAY = (datetime.now(UTC) + timedelta(days=10)).date()
 
 
-async def add_free_and_booked_slots(session) -> None:
+async def add_free_and_booked_slots(session, account_id: int) -> None:
     tz = get_settings().business_tz
-    lead = (await create_lead(session, name="Other Fake", email="other.fake@example.test")).lead
+    lead = await new_lead(session, account_id, name="Other Fake", email="other.fake@example.test")
     for hour, booked_by in [(10, None), (13, lead.id), (16, None)]:
         start = datetime(SLOT_DAY.year, SLOT_DAY.month, SLOT_DAY.day, hour, tzinfo=tz)
-        session.add(Slot(start_at=start, end_at=start + timedelta(hours=1), booked_by_lead_id=booked_by))
-    await session.flush()
+        await new_slot(session, account_id, start, booked_by=booked_by)
 
 
 async def only_free_slots_reached_model(session, out: Outcome) -> None:
@@ -205,10 +201,9 @@ BOOK_KIM_AT_10 = {
 }
 
 
-async def add_free_slot_at_10(session) -> None:
+async def add_free_slot_at_10(session, account_id: int) -> None:
     start = datetime(SLOT_DAY.year, SLOT_DAY.month, SLOT_DAY.day, 10, tzinfo=get_settings().business_tz)
-    session.add(Slot(start_at=start, end_at=start + timedelta(hours=1)))
-    await session.flush()
+    await new_slot(session, account_id, start)
 
 
 async def slot_at_10_holder(session) -> int | None:
@@ -227,6 +222,22 @@ async def booked_for_kim_and_linked(session, out: Outcome) -> None:
 async def booked_then_freed(session, out: Outcome) -> None:
     assert await slot_at_10_holder(session) is None
     assert out.tool_result_sent(7)["confirmed"] == "cancel_booking"
+
+
+async def add_other_business_kayak_faq_and_slot(session, account_id: int) -> None:
+    other = await new_account(session, business_name="Other Fake Shop")
+    await new_faq(
+        session, other.id, question="Do you rent kayaks?", answer="Yes, 20 dollars an hour.", embedding=unit(7)
+    )
+    await add_free_slot_at_10(session, other.id)
+
+
+async def other_business_data_never_reached_model(session, out: Outcome) -> None:
+    assert out.tool_result_sent(1) == {"matches": []}
+    assert out.tool_result_sent(2)["slots"] == []
+    assert out.tool_result_sent(3) == {"error": "There is no slot at that time. Check availability again."}
+    assert await slot_at_10_holder(session) is None
+    assert await lead_count(session) == 0
 
 
 KIM = {"name": "Kim Fake", "email": "kim.fake@example.test"}
@@ -332,6 +343,20 @@ CASES = [
         check=only_free_slots_reached_model,
     ),
     EvalCase(
+        name="other_business_data_hidden",
+        turns=[f"Do you rent kayaks? If not, book me a service at 10:00 on {SLOT_DAY.isoformat()}."],
+        script=[
+            call("search_faq", {"question": "Do you rent kayaks?"}),
+            call("check_availability", {"start_date": SLOT_DAY.isoformat()}),
+            call("book_slot", BOOK_KIM_AT_10),
+            say("Sorry, we don't rent kayaks and have no free time that day."),
+        ],
+        expected_tools=[("search_faq", OK), ("check_availability", OK), ("book_slot", ERROR)],
+        expected_reply="Sorry, we don't rent kayaks and have no free time that day.",
+        setup=add_other_business_kayak_faq_and_slot,
+        check=other_business_data_never_reached_model,
+    ),
+    EvalCase(
         name="confirm_in_same_turn_refused",
         turns=["Save me: Kim Fake, kim.fake@example.test"],
         script=[
@@ -394,8 +419,6 @@ CASES = [
         check=booked_for_kim_and_linked,
     ),
     EvalCase(
-        # Seen live: on "yes" the model proposed the same booking again (twice) instead of
-        # confirming. The repeat must not replace the earlier proposal, so confirm works.
         name="booking_repeated_on_yes_then_confirmed",
         turns=[f"Book me in at 10:00 on {SLOT_DAY.isoformat()}. Kim Fake, kim.fake@example.test", "yes"],
         script=[
