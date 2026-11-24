@@ -36,6 +36,8 @@ class Settings(BaseSettings):
     algorithm: Literal["HS256", "HS384", "HS512"] = "HS256"
     access_token_expire_minutes: int = Field(default=30, ge=1, le=1440)
 
+    public_chat_base_url: str = "http://localhost:8000"
+
     @field_validator("secret_key")
     @classmethod
     def _long_secret_key(cls, value: SecretStr) -> SecretStr:
@@ -45,6 +47,17 @@ class Settings(BaseSettings):
                 "generate one with: python -c \"import secrets; print(secrets.token_urlsafe(48))\""
             )
         return value
+
+    @field_validator("public_chat_base_url")
+    @classmethod
+    def _http_base_url(cls, value: str) -> str:
+        clean = value.strip().rstrip("/")
+        if not clean.startswith(("http://", "https://")) or "?" in clean or "#" in clean:
+            raise ValueError(
+                "PUBLIC_CHAT_BASE_URL must be an http(s) URL without a query or fragment, "
+                "like 'https://chat.example.com'"
+            )
+        return clean
 
     @field_validator("business_timezone")
     @classmethod
