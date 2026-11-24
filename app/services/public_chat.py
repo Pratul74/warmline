@@ -4,16 +4,19 @@ import hashlib
 import logging
 import secrets
 from dataclasses import dataclass
+from datetime import UTC, datetime
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.agent.loop import ChatFn
 from app.agent.tools import EmbedQueryFn
+from app.core.config import get_settings
 from app.core.llm import chat, embed_query
 from app.db.models import Account, Conversation, Integration, IntegrationStatus
 from app.db.session import DB_ERRORS
 from app.services.chat import ChatStorageError, ConversationNotFoundError, handle_chat
+from app.services.rate_limit import hit
 
 logger = logging.getLogger(__name__)
 
@@ -39,6 +42,10 @@ class PublicProfile:
 class PublicChatTurn:
     conversation_token: str
     reply: str
+
+
+def utc_now() -> datetime:
+    return datetime.now(UTC)
 
 
 def new_conversation_token() -> str:
@@ -103,6 +110,14 @@ async def handle_public_chat(
 ) -> PublicChatTurn:
     try:
         integration = await open_integration(session, public_id)
+        settings = get_settings()
+        await hit(
+            session,
+            integration_id=integration.id,
+            limit=settings.public_chat_rate_limit,
+            window_seconds=settings.public_chat_rate_window_seconds,
+            now=utc_now(),
+        )
         conversation_id = None
         if conversation_token is not None:
             conversation_id = await _find_conversation_id(
