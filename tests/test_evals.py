@@ -15,6 +15,8 @@ from app.core.llm import ChatResult, LLMError, ToolCall
 from app.db.models import Conversation, Lead, Slot, ToolCallStatus
 from app.db.models import ToolCall as ToolCallRow
 from app.services.chat import handle_chat
+from app.services.integrations import create_integration
+from app.services.public_chat import handle_public_chat
 from tests.factories import new_account, new_faq, new_lead, new_slot
 
 OK = ToolCallStatus.OK
@@ -489,3 +491,40 @@ async def test_eval(session, case: EvalCase):
     assert out.replies[-1] == case.expected_reply
     if case.check:
         await case.check(session, out)
+
+
+async def test_eval_public_link_lead_capture(session):
+    shop_a = await new_account(session, business_name="Fake Shop A")
+    shop_b = await new_account(session, business_name="Fake Shop B")
+    b_lead = await new_lead(session, shop_b.id, name="Kim at B", email=KIM["email"])
+    link = await create_integration(session, account_id=shop_a.id, name="Website chat")
+    model = ScriptedChat(
+        [call("create_lead", KIM), say("Shall I save that?"), call("confirm_pending_action"), say("Saved!")]
+    )
+
+    first = await handle_public_chat(
+        session, public_id=link.public_id, message="Call me: Kim Fake, kim.fake@example.test",
+        chat_fn=model, embed_query_fn=keyword_embedder,
+    )
+    second = await handle_public_chat(
+        session, public_id=link.public_id, message="Yes please",
+        conversation_token=first.conversation_token, chat_fn=model, embed_query_fn=keyword_embedder,
+    )
+
+    assert (first.reply, second.reply) == ("Shall I save that?", "Saved!")
+    assert second.conversation_token == first.conversation_token
+    conversation = await session.scalar(select(Conversation).where(Conversation.integration_id == link.id))
+    a_lead = await session.scalar(select(Lead).where(Lead.account_id == shop_a.id))
+    assert conversation.account_id == shop_a.id
+    assert conversation.lead_id == a_lead.id
+    assert (a_lead.email, a_lead.name) == (KIM["email"], KIM["name"])
+    await session.refresh(b_lead)
+    assert b_lead.name == "Kim at B"
+    audit = (
+        await session.execute(
+            select(ToolCallRow.tool_name, ToolCallRow.status)
+            .where(ToolCallRow.conversation_id == conversation.id)
+            .order_by(ToolCallRow.id)
+        )
+    ).all()
+    assert [tuple(row) for row in audit] == [("create_lead", OK), ("confirm_pending_action", OK)]
