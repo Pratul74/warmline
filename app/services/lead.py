@@ -58,15 +58,16 @@ def clean_lead_fields(
 async def create_lead(
         session: AsyncSession,
         *,
+        account_id: int,
         name: str,
         email: str,
         phone: str | None = None,
         notes: str | None = None,
 ) -> CreateLeadResult:
     fields = clean_lead_fields(name=name, email=email, phone=phone, notes=notes)
-    insert_stmt = pg_insert(Lead).values(**fields, status=_INITIAL_STATUS)
+    insert_stmt = pg_insert(Lead).values(**fields, account_id=account_id, status=_INITIAL_STATUS)
     upsert_stmt = insert_stmt.on_conflict_do_update(
-        index_elements=[func.lower(Lead.email)],
+        index_elements=[Lead.account_id, func.lower(Lead.email)],
         set_={
             "phone": func.coalesce(Lead.phone, insert_stmt.excluded.phone),
             "notes": func.coalesce(Lead.notes, insert_stmt.excluded.notes),
@@ -83,10 +84,13 @@ async def create_lead(
     lead, created = result.one()
     return CreateLeadResult(lead=lead, created=bool(created))
 
-async def get_lead_by_email(session: AsyncSession, email: str) -> Lead | None:
+async def get_lead_by_email(session: AsyncSession, *, account_id: int, email: str) -> Lead | None:
     canonical_email = canonicalize_email(email)
-    stmt = select(Lead).where(func.lower(Lead.email)== canonical_email)
+    stmt = select(Lead).where(
+        Lead.account_id == account_id, func.lower(Lead.email) == canonical_email
+    )
     return (await session.execute(stmt)).scalar_one_or_none()
 
-async def get_lead(session: AsyncSession, lead_id: int) -> Lead | None:
-    return await session.get(Lead, lead_id)
+async def get_lead(session: AsyncSession, *, account_id: int, lead_id: int) -> Lead | None:
+    stmt = select(Lead).where(Lead.account_id == account_id, Lead.id == lead_id)
+    return (await session.execute(stmt)).scalar_one_or_none()
