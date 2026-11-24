@@ -100,6 +100,8 @@ async def handle_chat(
     account_id: int,
     message: str,
     conversation_id: int | None = None,
+    integration_id: int | None = None,
+    public_token_hash: str | None = None,
     chat_fn: ChatFn = chat,
     embed_query_fn: EmbedQueryFn = embed_query,
     now: datetime | None = None,
@@ -110,6 +112,8 @@ async def handle_chat(
             account_id=account_id,
             message=message,
             conversation_id=conversation_id,
+            integration_id=integration_id,
+            public_token_hash=public_token_hash,
             chat_fn=chat_fn,
             embed_query_fn=embed_query_fn,
             now=now or datetime.now(get_settings().business_tz),
@@ -171,6 +175,8 @@ async def _handle_chat(
     account_id: int,
     message: str,
     conversation_id: int | None,
+    integration_id: int | None,
+    public_token_hash: str | None,
     chat_fn: ChatFn,
     embed_query_fn: EmbedQueryFn,
     now: datetime,
@@ -185,7 +191,11 @@ async def _handle_chat(
             raise ConversationNotFoundError(f"Conversation {conversation_id} not found")
         history = await _load_history(session, conversation_id)
     else:
-        conversation = Conversation(account_id=account_id)
+        conversation = Conversation(
+            account_id=account_id,
+            integration_id=integration_id,
+            public_token_hash=public_token_hash,
+        )
         session.add(conversation)
         await session.flush()
 
