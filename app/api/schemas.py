@@ -89,3 +89,37 @@ class PublicProfileResponse(BaseModel):
     name: str
     greeting: str | None
     business_name: str
+
+
+class FaqEntryResponse(BaseModel):
+    id: int
+    question: str
+    answer: str
+    created_at: datetime
+    updated_at: datetime
+
+
+class FaqPageResponse(BaseModel):
+    items: list[FaqEntryResponse]
+    total: int
+    page: int
+    page_size: int
+
+
+class FaqUploadResponse(BaseModel):
+    inserted: int
+    updated: int
+    unchanged: int
+
+
+class FaqRowErrorResponse(BaseModel):
+    row: int | None
+    field: str | None
+    message: str
+
+
+class FaqUploadErrorResponse(BaseModel):
+
+    detail: str
+    errors: list[FaqRowErrorResponse]
+
