@@ -322,6 +322,12 @@ class FaqEntry(Base):
         postgresql_ops={"embedding": "vector_cosine_ops"},
         ),
         Index("ix_faq_entries_account_id", "account_id"),
+        Index(
+            "uq_faq_entries_account_question",
+            "account_id",
+            text("lower(btrim(question))"),
+            unique=True,
+        ),
     )
 
     id: Mapped[int] = mapped_column(primary_key=True)
@@ -334,6 +340,9 @@ class FaqEntry(Base):
     embedding: Mapped[list[float]] = mapped_column(Vector(EMBEDDING_DIM))
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
     )
 
 class Slot(Base):
