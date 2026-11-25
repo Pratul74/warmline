@@ -1,3 +1,6 @@
+// /register. Creates an owner account, then sends the owner to /login with the email filled in.
+// Browser checks (required, length) are hints; the server's rules are the ones that count and
+// its message is shown as it is.
 import { useState } from "react";
 import { Link, Navigate, useNavigate } from "react-router";
 import {
@@ -5,10 +8,14 @@ import {
   MAX_PASSWORD_LENGTH,
   MIN_PASSWORD_LENGTH,
   register,
-} from "../api/auth.js";
-import { useAuth } from "../auth/AuthContext.jsx";
-import ErrorBanner from "../components/ErrorBanner.jsx";
-import styles from "./AuthForm.module.css";
+} from "@/api/auth";
+import { useAuth } from "@/auth/AuthContext";
+import { ErrorMessage } from "@/components/feedback/ErrorMessage";
+import { AuthLayout } from "@/components/layout/AuthLayout";
+import { Button } from "@/components/ui/button";
+import { Field } from "@/components/ui/field";
+import { Input } from "@/components/ui/input";
+import { useSubmit } from "@/hooks/useSubmit";
 
 export default function RegisterPage() {
   const { account } = useAuth();
@@ -17,74 +24,72 @@ export default function RegisterPage() {
   const [businessName, setBusinessName] = useState("");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
-  const [submitting, setSubmitting] = useState(false);
-  const [error, setError] = useState(null);
+  const { submit, submitting, error } = useSubmit(() =>
+    register({ email: email.trim(), password, businessName: businessName.trim() }),
+  );
 
-  if (account) return <Navigate to="/" replace />;
+  if (account) return <Navigate to="/app/integrations" replace />;
 
   async function handleSubmit(event) {
     event.preventDefault();
-    setSubmitting(true);
-    setError(null);
-    try {
-      const created = await register({
-        email: email.trim(),
-        password,
-        businessName: businessName.trim(),
-      });
-      navigate("/login", { state: { registeredEmail: created.email } });
-    } catch (err) {
-      setError(err.message);
-      setSubmitting(false);
-    }
+    const { ok, result } = await submit();
+    if (ok) navigate("/login", { state: { registeredEmail: result.email } });
   }
 
   return (
-    <main className="page-center">
-      <form className={`card ${styles.form}`} onSubmit={handleSubmit}>
-        <h1>Create your account</h1>
-        <ErrorBanner message={error} />
-
-        <label>
-          Business name
-          <input
-            required
-            maxLength={MAX_BUSINESS_NAME_LENGTH}
-            value={businessName}
-            onChange={(e) => setBusinessName(e.target.value)}
-          />
-        </label>
-        <label>
-          Email
-          <input
-            type="email"
-            autoComplete="email"
-            required
-            maxLength={320}
-            value={email}
-            onChange={(e) => setEmail(e.target.value)}
-          />
-        </label>
-        <label>
-          Password
-          <input
-            type="password"
-            autoComplete="new-password"
-            required
-            minLength={MIN_PASSWORD_LENGTH}
-            maxLength={MAX_PASSWORD_LENGTH}
-            value={password}
-            onChange={(e) => setPassword(e.target.value)}
-          />
-          <span className="muted">At least {MIN_PASSWORD_LENGTH} characters.</span>
-        </label>
-        <button type="submit" disabled={submitting}>
+    <AuthLayout title="Create your account" subtitle="Set up your business in under a minute.">
+      <title>Create account · Warmline</title>
+      <form className="grid gap-5" onSubmit={handleSubmit}>
+        <ErrorMessage error={error} />
+        <Field label="Business name" hint="Customers see this name in the chat.">
+          {(props) => (
+            <Input
+              {...props}
+              autoComplete="organization"
+              required
+              maxLength={MAX_BUSINESS_NAME_LENGTH}
+              value={businessName}
+              onChange={(event) => setBusinessName(event.target.value)}
+            />
+          )}
+        </Field>
+        <Field label="Email">
+          {(props) => (
+            <Input
+              {...props}
+              type="email"
+              autoComplete="email"
+              required
+              maxLength={320}
+              value={email}
+              onChange={(event) => setEmail(event.target.value)}
+            />
+          )}
+        </Field>
+        <Field label="Password" hint={`At least ${MIN_PASSWORD_LENGTH} characters.`}>
+          {(props) => (
+            <Input
+              {...props}
+              type="password"
+              autoComplete="new-password"
+              required
+              minLength={MIN_PASSWORD_LENGTH}
+              maxLength={MAX_PASSWORD_LENGTH}
+              value={password}
+              onChange={(event) => setPassword(event.target.value)}
+            />
+          )}
+        </Field>
+        <Button type="submit" disabled={submitting}>
           {submitting ? "Creating account…" : "Create account"}
-        </button>
-        <p className="muted">
-          Already have an account? <Link to="/login">Log in</Link>
+        </Button>
+        <p className="text-sm text-muted-foreground">
+          Already have an account?{" "}
+          <Link to="/login" className="font-medium text-primary underline-offset-4 hover:underline">
+            Log in
+          </Link>
         </p>
       </form>
-    </main>
+    </AuthLayout>
   );
 }
