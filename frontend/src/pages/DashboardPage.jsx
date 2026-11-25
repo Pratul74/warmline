@@ -4,11 +4,12 @@ import { useAuth } from "../auth/AuthContext.jsx";
 import CreateIntegrationForm from "../components/CreateIntegrationForm.jsx";
 import ErrorBanner from "../components/ErrorBanner.jsx";
 import IntegrationRow from "../components/IntegrationRow.jsx";
+import OwnerHeader from "../components/OwnerHeader.jsx";
 import Spinner from "../components/Spinner.jsx";
 import styles from "./DashboardPage.module.css";
 
 export default function DashboardPage() {
-  const { token, account, logout } = useAuth();
+  const { token } = useAuth();
 
   const [integrations, setIntegrations] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -45,15 +46,7 @@ export default function DashboardPage() {
 
   return (
     <div className={styles.page}>
-      <header className={styles.header}>
-        <div>
-          <h1>{account.business_name}</h1>
-          <p className="muted">{account.email}</p>
-        </div>
-        <button type="button" className="secondary" onClick={() => logout()}>
-          Log out
-        </button>
-      </header>
+      <OwnerHeader />
 
       <section className="card">
         <h2 className={styles.sectionTitle}>New integration</h2>
