@@ -4,7 +4,7 @@ import math
 from collections.abc import Sequence
 from dataclasses import dataclass
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models import FaqEntry
@@ -81,3 +81,22 @@ async def search_faq(
     if min_similarity is None:
         return matches
     return [match for match in matches if match.similarity >= min_similarity]
+
+
+MAX_PAGE_SIZE = 100
+
+
+async def list_faq_entries(
+    session: AsyncSession, *, account_id: int, page: int, page_size: int
+) -> tuple[list[FaqEntry], int]:
+    total = await session.scalar(
+        select(func.count()).select_from(FaqEntry).where(FaqEntry.account_id == account_id)
+    )
+    stmt = (
+        select(FaqEntry)
+        .where(FaqEntry.account_id == account_id)
+        .order_by(FaqEntry.id)
+        .offset((page - 1) * page_size)
+        .limit(page_size)
+    )
+    return list((await session.scalars(stmt)).all()), total or 0
