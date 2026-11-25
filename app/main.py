@@ -6,6 +6,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.auth import router as auth_router
 from app.api.chat import router as chat_router
+from app.api.faq import router as faq_router
 from app.api.integrations import router as integrations_router
 from app.api.public_chat import router as public_chat_router
 from app.core.config import get_settings
@@ -22,6 +23,7 @@ app = FastAPI(
 )
 app.include_router(auth_router)
 app.include_router(chat_router)
+app.include_router(faq_router)
 app.include_router(integrations_router)
 app.include_router(public_chat_router)
 
