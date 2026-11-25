@@ -1,14 +1,15 @@
-const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || "/api";
+export const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || "http://localhost:8000";
 
 const NETWORK_MESSAGE = "Can't reach the server. Check your connection and try again.";
 const UNAVAILABLE_MESSAGE = "Service temporarily unavailable, please try again.";
 
 export class ApiError extends Error {
-  constructor(status, message, retryAfter = null) {
+  constructor(status, message, retryAfter = null, errors = []) {
     super(message);
     this.name = "ApiError";
     this.status = status;
     this.retryAfter = retryAfter;
+    this.errors = errors;
   }
 }
 
@@ -19,8 +20,9 @@ export function setUnauthorizedHandler(handler) {
 }
 
 export async function apiFetch(path, { method = "GET", body, token } = {}) {
+  const isForm = body instanceof FormData;
   const headers = {};
-  if (body !== undefined) headers["Content-Type"] = "application/json";
+  if (body !== undefined && !isForm) headers["Content-Type"] = "application/json";
   if (token) headers.Authorization = `Bearer ${token}`;
 
   let response;
@@ -28,7 +30,7 @@ export async function apiFetch(path, { method = "GET", body, token } = {}) {
     response = await fetch(API_BASE_URL + path, {
       method,
       headers,
-      body: body === undefined ? undefined : JSON.stringify(body),
+      body: body === undefined || isForm ? body : JSON.stringify(body),
     });
   } catch {
 
@@ -39,7 +41,13 @@ export async function apiFetch(path, { method = "GET", body, token } = {}) {
 
   if (!response.ok) {
     if (response.status === 401 && token && onUnauthorized) onUnauthorized();
-    throw new ApiError(response.status, errorMessage(response.status, data), retryAfterSeconds(response));
+    const rowErrors = Array.isArray(data?.errors) ? data.errors : [];
+    throw new ApiError(
+      response.status,
+      errorMessage(response.status, data),
+      retryAfterSeconds(response),
+      rowErrors,
+    );
   }
   return data;
 }
