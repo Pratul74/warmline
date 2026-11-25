@@ -1,0 +1,4 @@
+# Public pages may be indexed. The owner area and the chat links are private to each business.
+User-agent: *
+Disallow: /app/
+Disallow: /c/
