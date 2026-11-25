@@ -1,6 +1,7 @@
 import { Route, Routes } from "react-router";
 import RequireAuth from "./auth/RequireAuth.jsx";
 import DashboardPage from "./pages/DashboardPage.jsx";
+import FaqPage from "./pages/FaqPage.jsx";
 import HostedChatPage from "./pages/HostedChatPage.jsx";
 import LoginPage from "./pages/LoginPage.jsx";
 import NotFoundPage from "./pages/NotFoundPage.jsx";
@@ -16,6 +17,14 @@ export default function App() {
         element={
           <RequireAuth>
             <DashboardPage />
+          </RequireAuth>
+        }
+      />
+      <Route
+        path="/faq"
+        element={
+          <RequireAuth>
+            <FaqPage />
           </RequireAuth>
         }
       />
