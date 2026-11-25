@@ -131,14 +131,20 @@ The frontend is a Vite + React app in plain JavaScript, in `frontend/`. Its runt
 dependencies are only `react`, `react-dom` and `react-router`, and it uses plain CSS
 Modules. It needs Node.js 22.22 or newer.
 
-Start the backend first, as above, with `PUBLIC_CHAT_BASE_URL=http://localhost:5173`
-in `.env`. Integration links are built from that value, so they must point at the
-frontend. Then, in a second terminal:
+Start the backend first, as above, with these two values in `.env` (both are in
+`.env.example`):
+- `PUBLIC_CHAT_BASE_URL=http://localhost:5173`: integration links are built from it, so
+  they must point at the frontend;
+- `CORS_ALLOWED_ORIGINS=http://localhost:5173`: lets the frontend's page call the API.
+
+Then, in a second terminal:
 
 ```bash
 cd frontend
+cp .env.example .env # VITE_API_BASE_URL=http://localhost:8000 (also the default)
 npm install
 npm run dev          # http://localhost:5173
+npm test             # component tests (Vitest, fake fetch, no backend needed)
 ```
 
 Open http://localhost:5173, create an account, log in, create an integration and
@@ -148,19 +154,29 @@ click **Open** next to its link.
 |---|---|
 | `/login`, `/register` | Owner log in and sign up. |
 | `/` | Dashboard (owner login required): list, create, edit, disable/enable and rotate integrations; copy or open each link. |
+| `/faq` | FAQ page (owner login required): upload a CSV, download the sample template, see the result (counts, or the server's row errors with row numbers), and page through the owner's FAQ entries. |
 | `/c/<public_id>` | Hosted chat that a link opens (no login). It shows the owner's business name, the integration's name and greeting, then the chat. |
 
 How it talks to the API:
 - **One API module.** Only `src/api/client.js` calls `fetch`. It sends requests to
-  `VITE_API_BASE_URL` (default `/api`). In development, Vite's proxy
-  (`vite.config.js`) forwards `/api/...` to `http://localhost:8000/...`. The browser
-  only ever talks to one origin, so the backend needs no CORS setup.
+  `VITE_API_BASE_URL` (default `http://localhost:8000`). The page (port 5173) and the
+  API (port 8000) are different origins, so the browser only lets the page read API
+  responses if the backend allows it: **CORS**. The backend sends CORS headers only
+  for the origins in `CORS_ALLOWED_ORIGINS` (empty means CORS off), allows the methods
+  GET, POST and PATCH and the headers `Authorization` and `Content-Type`, sends no
+  cookies (login uses a Bearer header), and exposes `Retry-After` so the chat can show
+  its countdown. CORS is a browser rule, not access control: `curl` or a script can
+  still call the API, and the login token is what protects owner data.
+- **File upload.** The FAQ page sends the file as `FormData`; the browser sets the
+  multipart `Content-Type`. The browser checks the extension and size only as a
+  convenience; the server's answer (counts, or its error and row table) is shown as it is.
 - **Owner login.** The login token and its expiry time are stored in `localStorage`
   and sent as `Authorization: Bearer <token>`. When the token's lifetime ends, or any
   owner request gets 401, the app logs out and the login page says the session expired.
 - **Visitors.** The hosted chat never uses an owner token. The visitor's
   `conversation_token` is kept only in page memory.
-- **Errors.** Every failure becomes one `ApiError` (status, message, Retry-After).
+- **Errors.** Every failure becomes one `ApiError` (status, message, Retry-After, and
+  the FAQ upload's row errors).
   Pages show it next to the action that failed, with a Retry button where it makes
   sense. Unknown or rotated links show "doesn't exist" (404), disabled links show
   "currently unavailable" (403), and the per-link 429 shows a countdown and blocks
@@ -193,7 +209,7 @@ docker compose exec db psql -U warmline -d warmline -c "CREATE DATABASE warmline
 uv run pytest -q
 ```
 
-- **291 tests** run against a real Postgres database, with a fake model and a fake embedder. They cover the LLM wrapper (with a fake SDK client), the agent loop, all seven tools, the confirmation flow, booking (including a two-connection double-booking test), request cost and latency logging, the audit log, the error responses, owner registration, login and tokens (including expired, tampered, wrong-key and `alg: none` tokens), isolation between accounts (one account cannot see or change another's leads, FAQ entries, slots or integrations), integration management (create, list, update, disable, rotate, refusals, a real commit), the public chat path (unknown, rotated and disabled links, tokens that only work on their own link, hashed storage, the link's owner deciding the FAQ), the per-link rate limit (exact limit, window reset, separate links, failed calls still counted, Retry-After, and twelve simultaneous requests counted exactly), the `/chat` API (owner-only, including the step limit and a crashing tool, end to end), and the FAQ CSV upload (BOM, odd headers, multi-line cells, blank rows, missing header, empty and over-long cells, in-file duplicates, non-UTF-8, the row and size limits checked before the form is read, all-or-nothing, idempotent re-upload, updates without duplicates, embedding in batches and embedding failure saving nothing, pagination, and one business never touching or seeing another's entries).
+- **303 tests** run against a real Postgres database, with a fake model and a fake embedder. They cover the LLM wrapper (with a fake SDK client), the agent loop, all seven tools, the confirmation flow, booking (including a two-connection double-booking test), request cost and latency logging, the audit log, the error responses, owner registration, login and tokens (including expired, tampered, wrong-key and `alg: none` tokens), isolation between accounts (one account cannot see or change another's leads, FAQ entries, slots or integrations), integration management (create, list, update, disable, rotate, refusals, a real commit), the public chat path (unknown, rotated and disabled links, tokens that only work on their own link, hashed storage, the link's owner deciding the FAQ), the per-link rate limit (exact limit, window reset, separate links, failed calls still counted, Retry-After, and twelve simultaneous requests counted exactly), the `/chat` API (owner-only, including the step limit and a crashing tool, end to end), and the FAQ CSV upload (BOM, odd headers, multi-line cells, blank rows, missing header, empty and over-long cells, in-file duplicates, non-UTF-8, the row and size limits checked before the form is read, all-or-nothing, idempotent re-upload, updates without duplicates, embedding in batches and embedding failure saving nothing, pagination, and one business never touching or seeing another's entries), and CORS (only the configured origins, allowed methods, no credentials, `Retry-After` exposed, origin setting validation).
 - **17 evals** (`tests/test_evals.py`) are customer-level scenarios run through the real chat service: FAQ hit, FAQ miss, lead captured (with confirmation), lead over several messages, bad arguments then fixed, retry give-up, unknown tool rejected, embedding outage, availability lookup, confirmation in the same turn refused, customer declines, details corrected before confirming, booking confirmed, booking proposed again on "yes" then confirmed, book then cancel, another business's FAQ and slot staying hidden, and a lead captured through a public link landing with the link's owner. Each checks the audit-log rows, the reply and the database.
 - **What the evals do not prove:** the model in them is scripted, so they test how this code handles each model behaviour, not whether Gemini chooses tools well. They don't test the system prompt or the 0.70 similarity threshold. There is no live evaluation against the real model.
 - **CI:** `.github/workflows/tests.yml` runs on every push and on pull requests to `main`, with a pgvector Postgres service container and placeholder settings (the Gemini key is a dummy, because no test calls the API). It first applies every migration to a separate empty database and runs `alembic check`, which fails if a model changed without a migration, then runs `uv run pytest -q`.
@@ -222,6 +238,7 @@ All settings come from environment variables (or `.env`). See `.env.example`.
 | `PUBLIC_CHAT_BASE_URL` | Where the hosted chat page (the frontend) is served; integration links are built from it. Set it to `http://localhost:5173` for local development, as `.env.example` does. If it is not set, the code falls back to `http://localhost:8000`. Must be http or https with no query. |
 | `PUBLIC_CHAT_RATE_LIMIT` | Messages one chat link accepts per window, from all visitors together (default 20). |
 | `PUBLIC_CHAT_RATE_WINDOW_SECONDS` | Length of the rate limit window in seconds (default 60). |
+| `CORS_ALLOWED_ORIGINS` | Comma-separated browser origins allowed to call the API, e.g. `http://localhost:5173` (scheme and host only, no path or wildcard). Empty (the default) = CORS off. |
 
 ## Not built yet
 
@@ -242,8 +259,13 @@ All settings come from environment variables (or `.env`). See `.env.example`.
   uploads at the same moment can report slightly wrong counts (the data itself stays correct
   because of the upsert). Upload counts are not logged in `request_logs`, and embedding calls
   are not counted in cost logging.
-- Frontend: no automated tests and no CI step yet. It was checked by hand and with a
-  throwaway browser script against the real backend, which is not in the repo. The
+- Frontend: only the FAQ upload form has automated tests (`npm test`, 7 component tests
+  with a fake `fetch`), and CI does not run them. The rest was checked by hand and with
+  a throwaway browser script against the real backend, which is not in the repo. The
+  FAQ page cannot edit or delete one entry, and the list has no search or sort (oldest
+  first). The browser's size check uses the file size, but the server limits the whole
+  request, so a file just under 1 MB passes the browser check and then gets the
+  server's 413. The
   owner token sits in `localStorage`, so any script injected into the page could read
   it. An `httpOnly` cookie would avoid that but needs backend changes and CSRF
   protection. There is no refresh token, so owners log in again when the token expires
@@ -252,16 +274,15 @@ All settings come from environment variables (or `.env`). See `.env.example`.
   does not see it. In a live test the agent did not know the business's name when
   asked, because the system prompt does not include it. The frontend shows the name,
   but the agent's answer is a backend prompt matter. The frontend is served only by
-  the Vite dev server. Production serving (same origin, or CORS, which must expose
-  `Retry-After`) is not built.
+  the Vite dev server; production hosting and the production CORS origin are not
+  decided.
 - Public chat rate limit: the limit is per link, for all visitors together; there is no
   per-visitor or per-IP limit. It caps the owner's cost, but one visitor or bot can use up a
   link's whole quota and block real customers until the window ends. A fixed window also
   allows up to twice the limit in a short burst around a window boundary. Old counter rows
   are never deleted (one small row per active link per window). Each message costs one extra
   database write and commit.
-- Public chat: there is no route to read a conversation's earlier messages and no CORS setup
-  (the frontend uses a same-origin dev proxy). Conversation tokens never expire. A token from before a
+- Public chat: there is no route to read a conversation's earlier messages. Conversation tokens never expire. A token from before a
   rotation keeps working on the new link (the conversation belongs to the integration, not to
   one `public_id`); the old link itself answers 404. The owner can also continue a public
   conversation through `POST /chat`, because it belongs to their account.
