@@ -5,6 +5,9 @@ message; the agent answers questions from the business's FAQ, lists free
 appointment slots, and, after the customer confirms, saves leads and books or
 cancels slots. It records every tool it runs in an audit log.
 
+A React web app (`frontend/`) gives business owners a dashboard for their
+chat links, and gives visitors the hosted chat page that a link opens.
+
 It uses Google Gemini with native function calling. The agent loop is
 hand-written (no LangChain or other agent framework) and short enough to
 read in one sitting.
@@ -117,6 +120,50 @@ curl -X POST localhost:8000/public/c/$PUBLIC_ID/messages -H "Content-Type: appli
 curl -X POST localhost:8000/public/c/$PUBLIC_ID/messages -H "Content-Type: application/json"      -d '{"message": "The earliest one, please", "conversation_token": "..."}'
 ```
 
+## Run the frontend
+
+The frontend is a Vite + React app in plain JavaScript, in `frontend/`. Its runtime
+dependencies are only `react`, `react-dom` and `react-router`, and it uses plain CSS
+Modules. It needs Node.js 22.22 or newer.
+
+Start the backend first, as above, with `PUBLIC_CHAT_BASE_URL=http://localhost:5173`
+in `.env`. Integration links are built from that value, so they must point at the
+frontend. Then, in a second terminal:
+
+```bash
+cd frontend
+npm install
+npm run dev          # http://localhost:5173
+```
+
+Open http://localhost:5173, create an account, log in, create an integration and
+click **Open** next to its link.
+
+| Route | Page |
+|---|---|
+| `/login`, `/register` | Owner log in and sign up. |
+| `/` | Dashboard (owner login required): list, create, edit, disable/enable and rotate integrations; copy or open each link. |
+| `/c/<public_id>` | Hosted chat that a link opens (no login). It shows the owner's business name, the integration's name and greeting, then the chat. |
+
+How it talks to the API:
+- **One API module.** Only `src/api/client.js` calls `fetch`. It sends requests to
+  `VITE_API_BASE_URL` (default `/api`). In development, Vite's proxy
+  (`vite.config.js`) forwards `/api/...` to `http://localhost:8000/...`. The browser
+  only ever talks to one origin, so the backend needs no CORS setup.
+- **Owner login.** The login token and its expiry time are stored in `localStorage`
+  and sent as `Authorization: Bearer <token>`. When the token's lifetime ends, or any
+  owner request gets 401, the app logs out and the login page says the session expired.
+- **Visitors.** The hosted chat never uses an owner token. The visitor's
+  `conversation_token` is kept only in page memory.
+- **Errors.** Every failure becomes one `ApiError` (status, message, Retry-After).
+  Pages show it next to the action that failed, with a Retry button where it makes
+  sense. Unknown or rotated links show "doesn't exist" (404), disabled links show
+  "currently unavailable" (403), and the per-link 429 shows a countdown and blocks
+  Send until it ends.
+
+`npm run build` writes a static build to `frontend/dist/`. How that build is served in
+production is not decided yet.
+
 ## Run it with Docker Compose
 
 ```bash
@@ -167,24 +214,36 @@ All settings come from environment variables (or `.env`). See `.env.example`.
 | `SECRET_KEY` | Signs owner login tokens. At least 32 characters (the app refuses to start otherwise). Never commit it; changing it logs everyone out. |
 | `ALGORITHM` | Token signing algorithm: `HS256` (default), `HS384` or `HS512`. |
 | `ACCESS_TOKEN_EXPIRE_MINUTES` | Lifetime of a login token (default 30, 1 to 1440). |
-| `PUBLIC_CHAT_BASE_URL` | Where the hosted chat will be served; integration links are built from it (default `http://localhost:8000`, http or https, no query). |
+| `PUBLIC_CHAT_BASE_URL` | Where the hosted chat page (the frontend) is served; integration links are built from it. Set it to `http://localhost:5173` for local development, as `.env.example` does. If it is not set, the code falls back to `http://localhost:8000`. Must be http or https with no query. |
 | `PUBLIC_CHAT_RATE_LIMIT` | Messages one chat link accepts per window, from all visitors together (default 20). |
 | `PUBLIC_CHAT_RATE_WINDOW_SECONDS` | Length of the rate limit window in seconds (default 60). |
 
 ## Not built yet
 
-- The public chat API works through integration links, but the hosted chat page that the link opens is Phase 4. No frontend, no deployment, no dashboard or endpoint for the request logs, and no live evaluation set.
+- No deployment: the frontend and backend run only locally, and the frontend is not in Docker Compose. No dashboard or endpoint for the request logs, no owner page for leads, FAQ entries or bookings, and no live evaluation set.
 
 ## Known limitations
 
+- Frontend: no automated tests and no CI step yet. It was checked by hand and with a
+  throwaway browser script against the real backend, which is not in the repo. The
+  owner token sits in `localStorage`, so any script injected into the page could read
+  it. An `httpOnly` cookie would avoid that but needs backend changes and CSRF
+  protection. There is no refresh token, so owners log in again when the token expires
+  (default 30 minutes). Reloading the hosted chat starts a new conversation, because
+  the backend has no history route. The greeting is only shown on screen; the agent
+  does not see it. In a live test the agent did not know the business's name when
+  asked, because the system prompt does not include it. The frontend shows the name,
+  but the agent's answer is a backend prompt matter. The frontend is served only by
+  the Vite dev server. Production serving (same origin, or CORS, which must expose
+  `Retry-After`) is not built.
 - Public chat rate limit: the limit is per link, for all visitors together; there is no
   per-visitor or per-IP limit. It caps the owner's cost, but one visitor or bot can use up a
   link's whole quota and block real customers until the window ends. A fixed window also
   allows up to twice the limit in a short burst around a window boundary. Old counter rows
   are never deleted (one small row per active link per window). Each message costs one extra
   database write and commit.
-- Public chat: there is no route to read a conversation's earlier messages, no CORS setup and
-  no hosted page yet (Phase 4). Conversation tokens never expire. A token from before a
+- Public chat: there is no route to read a conversation's earlier messages and no CORS setup
+  (the frontend uses a same-origin dev proxy). Conversation tokens never expire. A token from before a
   rotation keeps working on the new link (the conversation belongs to the integration, not to
   one `public_id`); the old link itself answers 404. The owner can also continue a public
   conversation through `POST /chat`, because it belongs to their account.
