@@ -1,123 +1,144 @@
+/* Global styles: Tailwind, the self-hosted fonts and the design tokens (direction A, "Warm workshop").
+   Every colour, radius and shadow in the app comes from the variables below, so a change here
+   changes the whole product. Contrast of each text pair was checked (WCAG AA, 4.5:1 or more). */
+@import "tailwindcss";
+@import "@fontsource-variable/inter";
+@import "@fontsource-variable/fraunces";
+
+/* A metric-matched fallback: while Inter loads, Arial is scaled to Inter's size so the text
+   does not jump when the real font arrives (less layout shift). */
+@font-face {
+  font-family: "Inter Fallback";
+  src: local("Arial");
+  size-adjust: 107%;
+  ascent-override: 90%;
+  descent-override: 22.5%;
+  line-gap-override: 0%;
+}
+
 :root {
-  --bg: #f6f7f9;
-  --surface: #ffffff;
-  --text: #1d2330;
-  --muted: #5f6878;
-  --border: #d9dde4;
-  --accent: #2563eb;
-  --accent-hover: #1d4ed8;
+  /* Surfaces: warm paper instead of stark white; cards stay white so they lift off the page. */
+  --background: #faf7f2;
+  --foreground: #1f1b16;
+  --card: #ffffff;
+  --card-foreground: #1f1b16;
+  --popover: #ffffff;
+  --popover-foreground: #1f1b16;
+
+  /* Ember: the one brand colour. Used for primary actions, links and focus. 5.2:1 on white. */
+  --primary: #c2410c;
+  --primary-hover: #9a3412;
+  --primary-foreground: #ffffff;
+  --primary-soft: #fbede3;
+
+  /* Sand: quiet backgrounds for secondary buttons, table headers and the user's own chat bubbles. */
+  --secondary: #f1ebe2;
+  --secondary-foreground: #1f1b16;
+  --muted: #f1ebe2;
+  --muted-foreground: #6b6259;
+  --accent: #f3e8de;
+  --accent-foreground: #1f1b16;
+
+  /* Status colours, each with a soft background for banners and badges. */
+  --destructive: #b42318;
+  --destructive-soft: #fef3f2;
   --success: #15803d;
-  --success-bg: #ecfdf3;
-  --danger: #b42318;
-  --danger-bg: #fef3f2;
-  --danger-border: #fecdca;
-  --radius: 8px;
+  --success-soft: #ecfdf3;
 
-  font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
-  line-height: 1.5;
-  color: var(--text);
-  background: var(--bg);
+  /* Lines: borders are subtle; input borders are darker so fields are easy to see (3.7:1). */
+  --border: #e7e0d6;
+  --input: #8c8279;
+  --ring: #c2410c;
+
+  --radius: 6px;
 }
 
-* {
-  box-sizing: border-box;
+/* Expose the variables to Tailwind as utilities: bg-background, text-primary, border-border, ... */
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-hover: var(--primary-hover);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-primary-soft: var(--primary-soft);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-destructive-soft: var(--destructive-soft);
+  --color-success: var(--success);
+  --color-success-soft: var(--success-soft);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+
+  --radius-sm: calc(var(--radius) - 2px);
+  --radius-md: var(--radius);
+  --radius-lg: calc(var(--radius) + 2px);
+  --radius-xl: calc(var(--radius) + 6px);
+
+  --font-sans: "Inter Variable", "Inter Fallback", system-ui, sans-serif;
+  --font-display: "Fraunces Variable", Georgia, "Times New Roman", serif;
+
+  /* Warm-tinted shadows (ink colour, low opacity) so they don't look grey on the paper background. */
+  --shadow-card: 0 1px 2px rgb(31 27 22 / 0.06), 0 1px 1px rgb(31 27 22 / 0.04);
+  --shadow-raised: 0 8px 24px rgb(31 27 22 / 0.1), 0 2px 6px rgb(31 27 22 / 0.06);
 }
 
-body {
-  margin: 0;
+/* The only two animations: a fade for overlays and menus, and a small "pop" for dialogs and
+   toasts. Short (150ms) so they feel responsive; switched off by the reduced-motion rule below. */
+@theme {
+  --animate-fade-in: fade-in 150ms ease-out;
+  --animate-pop-in: pop-in 150ms ease-out;
+
+  @keyframes fade-in {
+    from {
+      opacity: 0;
+    }
+  }
+  @keyframes pop-in {
+    from {
+      opacity: 0;
+      scale: 0.97;
+    }
+  }
 }
 
-h1,
-h2,
-h3 {
-  margin: 0;
-  line-height: 1.25;
+@layer base {
+  * {
+    @apply border-border;
+  }
+  html {
+    @apply bg-background text-foreground antialiased;
+    font-family: var(--font-sans);
+  }
+  h1,
+  h2,
+  h3 {
+    font-family: var(--font-display);
+    letter-spacing: -0.01em;
+  }
+  /* One visible focus style for everything that can be focused with the keyboard. */
+  :focus-visible {
+    @apply outline-2 outline-offset-2 outline-ring;
+  }
 }
 
-a {
-  color: var(--accent);
-}
-
-label {
-  display: flex;
-  flex-direction: column;
-  gap: 0.25rem;
-  font-size: 0.9rem;
-  font-weight: 500;
-}
-
-input,
-textarea {
-  font: inherit;
-  padding: 0.5rem 0.6rem;
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  background: var(--surface);
-  color: inherit;
-}
-
-input:focus,
-textarea:focus {
-  outline: 2px solid var(--accent);
-  outline-offset: -1px;
-}
-
-button {
-  font: inherit;
-  font-weight: 500;
-  padding: 0.5rem 0.9rem;
-  border: 1px solid var(--accent);
-  border-radius: var(--radius);
-  background: var(--accent);
-  color: #fff;
-  cursor: pointer;
-}
-
-button:hover:not(:disabled) {
-  background: var(--accent-hover);
-}
-
-button:disabled {
-  opacity: 0.55;
-  cursor: not-allowed;
-}
-
-button.secondary {
-  background: var(--surface);
-  color: var(--text);
-  border-color: var(--border);
-}
-
-button.secondary:hover:not(:disabled) {
-  background: var(--bg);
-}
-
-button.danger {
-  background: var(--surface);
-  color: var(--danger);
-  border-color: var(--danger-border);
-}
-
-button.danger:hover:not(:disabled) {
-  background: var(--danger-bg);
-}
-
-.card {
-  background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  padding: 1.25rem;
-}
-
-.muted {
-  color: var(--muted);
-}
-
-/* Centres one block on the screen: used for spinners and full-page messages. */
-.page-center {
-  min-height: 100vh;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  padding: 1rem;
+/* People who ask their system for less motion get no transitions or animations. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
 }
