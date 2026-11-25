@@ -127,76 +127,35 @@ curl -X POST localhost:8000/public/c/$PUBLIC_ID/messages -H "Content-Type: appli
 
 ## Run the frontend
 
-The frontend is a Vite + React app in plain JavaScript, in `frontend/`. Its runtime
-dependencies are only `react`, `react-dom` and `react-router`, and it uses plain CSS
-Modules. It needs Node.js 22.22 or newer.
+The frontend is a Vite + React app in plain JavaScript, in `frontend/`, styled with
+Tailwind CSS and shadcn/ui components (copied into the repo as JSX, built on Radix).
+It needs Node.js 22.22 or newer (CI uses Node 24). Details, folder structure and the
+production notes are in [`frontend/README.md`](frontend/README.md).
 
 Start the backend first, as above, with these two values in `.env` (both are in
 `.env.example`):
-- `PUBLIC_CHAT_BASE_URL=http://localhost:5173`: integration links are built from it, so
-  they must point at the frontend;
+- `PUBLIC_CHAT_BASE_URL=http://localhost:5173`: chat links are built from it, so they
+  must point at the frontend;
 - `CORS_ALLOWED_ORIGINS=http://localhost:5173`: lets the frontend's page call the API.
 
 Then, in a second terminal:
 
 ```bash
 cd frontend
-cp .env.example .env # VITE_API_BASE_URL=http://localhost:8000 (also the default)
+cp .env.example .env # VITE_API_BASE_URL and VITE_SITE_URL
 npm install
 npm run dev          # http://localhost:5173
-npm test             # component tests (Vitest, fake fetch, no backend needed)
+npm test             # unit and component tests (Vitest, fake fetch, no backend needed)
 ```
-
-Open http://localhost:5173, create an account, log in, create an integration and
-click **Open** next to its link.
 
 | Route | Page |
 |---|---|
+| `/` | Landing page. |
 | `/login`, `/register` | Owner log in and sign up. |
-| `/` | Dashboard (owner login required): list, create, edit, disable/enable and rotate integrations; copy or open each link. |
-| `/faq` | FAQ page (owner login required): upload a CSV, download the sample template, see the result (counts, or the server's row errors with row numbers), and page through the owner's FAQ entries. |
-| `/c/<public_id>` | Hosted chat that a link opens (no login). It shows the owner's business name, the integration's name and greeting, then the chat. |
+| `/app/integrations` | Chat links (login required): create, edit, disable/enable, rotate, copy, open. |
+| `/app/faq` | FAQ (login required): upload a CSV (drag and drop or pick), see counts or the server's row errors, page through entries. |
+| `/c/<public_id>` | Hosted chat that a link opens (no login). |
 
-How it talks to the API:
-- **One API module.** Only `src/api/client.js` calls `fetch`. It sends requests to
-  `VITE_API_BASE_URL` (default `http://localhost:8000`). The page (port 5173) and the
-  API (port 8000) are different origins, so the browser only lets the page read API
-  responses if the backend allows it: **CORS**. The backend sends CORS headers only
-  for the origins in `CORS_ALLOWED_ORIGINS` (empty means CORS off), allows the methods
-  GET, POST and PATCH and the headers `Authorization` and `Content-Type`, sends no
-  cookies (login uses a Bearer header), and exposes `Retry-After` so the chat can show
-  its countdown. CORS is a browser rule, not access control: `curl` or a script can
-  still call the API, and the login token is what protects owner data.
-- **File upload.** The FAQ page sends the file as `FormData`; the browser sets the
-  multipart `Content-Type`. The browser checks the extension and size only as a
-  convenience; the server's answer (counts, or its error and row table) is shown as it is.
-- **Owner login.** The login token and its expiry time are stored in `localStorage`
-  and sent as `Authorization: Bearer <token>`. When the token's lifetime ends, or any
-  owner request gets 401, the app logs out and the login page says the session expired.
-- **Visitors.** The hosted chat never uses an owner token. The visitor's
-  `conversation_token` is kept only in page memory.
-- **Errors.** Every failure becomes one `ApiError` (status, message, Retry-After, and
-  the FAQ upload's row errors).
-  Pages show it next to the action that failed, with a Retry button where it makes
-  sense. Unknown or rotated links show "doesn't exist" (404), disabled links show
-  "currently unavailable" (403), and the per-link 429 shows a countdown and blocks
-  Send until it ends.
-
-`npm run build` writes a static build to `frontend/dist/`. How that build is served in
-production is not decided yet.
-
-## Run it with Docker Compose
-
-```bash
-docker compose up --build
-```
-
-This builds the API image and starts it next to Postgres on
-`127.0.0.1:8000`. The container runs `alembic upgrade head` before starting
-the server. The API key reaches the container at run time through
-`env_file: .env`; `.env` is excluded from the image by `.dockerignore`. To
-load the fake FAQ entries and slots for an account, run
-`uv run python -m scripts.seed_faq --account-id <id>` and
 `uv run python -m scripts.seed_slots --account-id <id>` from the host (the scripts are not in the image).
 
 ## Tests, evals and CI
@@ -213,6 +172,7 @@ uv run pytest -q
 - **17 evals** (`tests/test_evals.py`) are customer-level scenarios run through the real chat service: FAQ hit, FAQ miss, lead captured (with confirmation), lead over several messages, bad arguments then fixed, retry give-up, unknown tool rejected, embedding outage, availability lookup, confirmation in the same turn refused, customer declines, details corrected before confirming, booking confirmed, booking proposed again on "yes" then confirmed, book then cancel, another business's FAQ and slot staying hidden, and a lead captured through a public link landing with the link's owner. Each checks the audit-log rows, the reply and the database.
 - **What the evals do not prove:** the model in them is scripted, so they test how this code handles each model behaviour, not whether Gemini chooses tools well. They don't test the system prompt or the 0.70 similarity threshold. There is no live evaluation against the real model.
 - **CI:** `.github/workflows/tests.yml` runs on every push and on pull requests to `main`, with a pgvector Postgres service container and placeholder settings (the Gemini key is a dummy, because no test calls the API). It first applies every migration to a separate empty database and runs `alembic check`, which fails if a model changed without a migration, then runs `uv run pytest -q`.
+- **Frontend CI:** `.github/workflows/frontend.yml` runs when `frontend/` changes: `npm ci`, lint, the Prettier check, `npm test` (48 tests) and a production build.
 
 ## Configuration
 
@@ -242,7 +202,7 @@ All settings come from environment variables (or `.env`). See `.env.example`.
 
 ## Not built yet
 
-- No deployment: the frontend and backend run only locally, and the frontend is not in Docker Compose. No dashboard or endpoint for the request logs, no owner page for leads, FAQ entries or bookings, and no live evaluation set.
+- No deployment: the frontend and backend run only locally, and the frontend is not in Docker Compose. No dashboard or endpoint for the request logs, no owner page for leads or bookings, and no live evaluation set.
 
 ## Known limitations
 
@@ -259,23 +219,11 @@ All settings come from environment variables (or `.env`). See `.env.example`.
   uploads at the same moment can report slightly wrong counts (the data itself stays correct
   because of the upsert). Upload counts are not logged in `request_logs`, and embedding calls
   are not counted in cost logging.
-- Frontend: only the FAQ upload form has automated tests (`npm test`, 7 component tests
-  with a fake `fetch`), and CI does not run them. The rest was checked by hand and with
-  a throwaway browser script against the real backend, which is not in the repo. The
-  FAQ page cannot edit or delete one entry, and the list has no search or sort (oldest
-  first). The browser's size check uses the file size, but the server limits the whole
-  request, so a file just under 1 MB passes the browser check and then gets the
-  server's 413. The
-  owner token sits in `localStorage`, so any script injected into the page could read
-  it. An `httpOnly` cookie would avoid that but needs backend changes and CSRF
-  protection. There is no refresh token, so owners log in again when the token expires
-  (default 30 minutes). Reloading the hosted chat starts a new conversation, because
-  the backend has no history route. The greeting is only shown on screen; the agent
-  does not see it. In a live test the agent did not know the business's name when
-  asked, because the system prompt does not include it. The frontend shows the name,
-  but the agent's answer is a backend prompt matter. The frontend is served only by
-  the Vite dev server; production hosting and the production CORS origin are not
-  decided.
+- Frontend: see the "Known limitations" section of `frontend/README.md`. In short: no
+  type checking (plain JavaScript, by choice), the owner token sits in `localStorage`
+  (an `httpOnly` cookie would need backend changes), no refresh token, a reload of the
+  hosted chat starts a new conversation, the agent does not know the business's name
+  (backend prompt), and production hosting is not decided.
 - Public chat rate limit: the limit is per link, for all visitors together; there is no
   per-visitor or per-IP limit. It caps the owner's cost, but one visitor or bot can use up a
   link's whole quota and block real customers until the window ends. A fixed window also
