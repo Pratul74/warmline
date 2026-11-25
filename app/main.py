@@ -1,6 +1,7 @@
 import logging
 
 from fastapi import FastAPI, HTTPException, Depends
+from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -21,6 +22,20 @@ logger = logging.getLogger(__name__)
 app = FastAPI(
     title="Warmline - A Sales and support Agent"
 )
+
+
+def configure_cors(app: FastAPI, origins: list[str]) -> None:
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=origins,
+        allow_methods=["GET", "POST", "PATCH"],
+        allow_headers=["Authorization", "Content-Type"],
+        expose_headers=["Retry-After"],
+        allow_credentials=False,
+    )
+
+
+configure_cors(app, get_settings().cors_origins)
 app.include_router(auth_router)
 app.include_router(chat_router)
 app.include_router(faq_router)
