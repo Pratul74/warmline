@@ -1,0 +1,4 @@
+# Shell scripts and deployment files run on Linux: always LF line endings, even on a
+# Windows checkout (a CRLF "#!/bin/sh" line fails to run).
+*.sh text eol=lf
+deploy/** text eol=lf
