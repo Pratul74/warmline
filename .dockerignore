@@ -38,3 +38,14 @@ README.md
 
 
 frontend/
+
+
+docs/
+AGENTS.md
+CLAUDE.md
+
+
+deploy/
+.github/
+*.pem
+*.key
