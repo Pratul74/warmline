@@ -1,2 +1,9 @@
 .env
 __pycache__/
+*.pem
+*.key
+deploy/certs/
+deploy/webroot/
+deploy/current_tag
+deploy/previous_tag
+letsencrypt/
