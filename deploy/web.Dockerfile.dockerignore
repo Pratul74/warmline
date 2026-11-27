@@ -1,0 +1,11 @@
+# Build context for deploy/web.Dockerfile: only the frontend sources and the nginx config.
+# Everything else (backend, .env, docs/, AGENTS.md, CLAUDE.md, .git) stays out.
+*
+!frontend/
+!deploy/nginx/
+
+frontend/node_modules
+frontend/dist
+frontend/coverage
+**/.env
+**/.env.*
